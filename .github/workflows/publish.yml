@@ -1,0 +1,36 @@
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install
+        run: npm install
+
+      - name: Build
+        run: npm run build
+
+      # BOOTSTRAP: first publish uses the temporary NPM_TOKEN secret (npm won't
+      # accept OIDC for a package that doesn't exist yet). Once the Trusted
+      # Publisher is configured on npmjs.com, DROP the env line below and revoke
+      # the token — subsequent publishes are pure OIDC.
+      - name: Publish
+        run: npx -y npm@latest publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
