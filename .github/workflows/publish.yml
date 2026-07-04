@@ -26,11 +26,5 @@ jobs:
       - name: Build
         run: npm run build
 
-      # BOOTSTRAP: first publish uses the temporary NPM_TOKEN secret (npm won't
-      # accept OIDC for a package that doesn't exist yet). Once the Trusted
-      # Publisher is configured on npmjs.com, DROP the env line below and revoke
-      # the token — subsequent publishes are pure OIDC.
       - name: Publish
         run: npx -y npm@latest publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
