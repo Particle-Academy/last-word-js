@@ -111,7 +111,7 @@ describe("jsonSchema / version", () => {
   });
 
   it("reports its version", () => {
-    expect(Agent.version()).toBe("0.1.0");
+    expect(Agent.version()).toBe("0.2.0");
   });
 
   it("exposes the Validator service directly", () => {

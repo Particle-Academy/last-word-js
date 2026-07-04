@@ -85,6 +85,17 @@ Images are embedded from data URLs (PNG/JPEG); when `widthPx`/`heightPx` are
 omitted the intrinsic size is sniffed from the bytes (PNG IHDR / JPEG SOF)
 and capped at 6.5in width keeping aspect.
 
+## Cross-language parity
+
+As of 0.2.0 the metadata slots match the PHP mirror exactly: the title is
+carried in `docProps/core.xml` (`dc:title`) and the code block `language` in
+a `lastword:code:{lang}` content-control tag (quotes use `lastword:quote`),
+so the **same file opens in either engine** — title and code language
+round-trip Node ↔ PHP in both directions. Files written by PHP 0.1.x
+(Title-styled paragraph, `LastWordCode_{lang}` bookmark) still read fine;
+the sibling repo's canonical fixture is frozen into each test suite as a
+cross-read vector.
+
 ---
 
 ## ⭐ Star Fancy UI

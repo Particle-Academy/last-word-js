@@ -1,6 +1,8 @@
 /**
  * DocxReader — .docx bytes → Doc JSON model. Handles this package's own
- * writer output losslessly (round-trip) and tolerates Word-authored files:
+ * writer output losslessly (round-trip), the PHP mirror's output (same
+ * metadata slots since 0.2.0, plus the legacy `LastWordCode_{lang}` bookmark
+ * fallback for PHP ≤0.1.x files) and tolerates Word-authored files:
  * headings via pStyle Heading1-9 OR outlineLvl, numPr lists with ilvl nesting,
  * hyperlinks via rels, images via blip r:embed, page breaks, bottom-border-only
  * paragraphs → hr. Unknown constructs degrade to plain paragraphs, never throw.
@@ -140,6 +142,7 @@ export class DocxReader {
     const blocks: Block[] = [];
     let listBuf: FlatListItem[] = [];
     let codeBuf: string[] | null = null;
+    let codeLang: string | null = null;
     let quoteBuf: Block[] | null = null;
 
     const flushList = (): void => {
@@ -150,8 +153,11 @@ export class DocxReader {
     };
     const flushCode = (): void => {
       if (codeBuf !== null) {
-        blocks.push({ type: "code", text: codeBuf.join("\n") });
+        const block: Block = { type: "code", text: codeBuf.join("\n") };
+        if (codeLang !== null) (block as Any).language = codeLang;
+        blocks.push(orderCodeKeys(block));
         codeBuf = null;
+        codeLang = null;
       }
     };
     const flushQuote = (): void => {
@@ -177,7 +183,10 @@ export class DocxReader {
           } else if (kind.kind === "codeLine") {
             flushList();
             flushQuote();
-            if (codeBuf === null) codeBuf = [];
+            if (codeBuf === null) {
+              codeBuf = [];
+              codeLang = kind.language ?? null;
+            }
             codeBuf.push(kind.text);
           } else if (kind.kind === "quoteParagraph" && !ctx.insideQuote) {
             flushList();
@@ -246,7 +255,7 @@ export class DocxReader {
     p: XmlNode,
   ):
     | { kind: "listItem"; item: FlatListItem }
-    | { kind: "codeLine"; text: string }
+    | { kind: "codeLine"; text: string; language?: string }
     | { kind: "quoteParagraph"; blocks: Block[] }
     | { kind: "blocks"; blocks: Block[] } {
     const pPr = el(p, "pPr");
@@ -260,9 +269,14 @@ export class DocxReader {
       return { kind: "listItem", item: { numId, ilvl, runs: this.parseRuns(p, undefined) } };
     }
 
-    // Code line? (SDT-less tolerance path)
+    // Code line? (SDT-less tolerance path — bare style, or PHP last-word
+    // ≤0.1.x output which stashed the language in an invisible
+    // `LastWordCode_{lang}` bookmark on the first code paragraph.)
     if (/^(CodeBlock|SourceCode|HTMLPreformatted|Code)$/i.test(styleId)) {
-      return { kind: "codeLine", text: this.plainText(p) };
+      const language = this.legacyBookmarkLanguage(p);
+      return language !== undefined
+        ? { kind: "codeLine", text: this.plainText(p), language }
+        : { kind: "codeLine", text: this.plainText(p) };
     }
 
     const blocks: Block[] = [];
@@ -309,6 +323,22 @@ export class DocxReader {
       return { kind: "quoteParagraph", blocks };
     }
     return { kind: "blocks", blocks };
+  }
+
+  /**
+   * Back-compat: the code language from a PHP last-word ≤0.1.x
+   * `LastWordCode_{lang}` bookmark on this paragraph, if present. The
+   * canonical carrier is the `lastword:code:{lang}` sdt tag.
+   */
+  private legacyBookmarkLanguage(p: XmlNode): string | undefined {
+    for (const child of p.children) {
+      if (child.name !== "bookmarkStart") continue;
+      const name = at(child, "name") ?? "";
+      if (name.startsWith("LastWordCode_") && name.length > "LastWordCode_".length) {
+        return name.slice("LastWordCode_".length);
+      }
+    }
+    return undefined;
   }
 
   /** Concatenated visible text of a paragraph (tabs and soft breaks included). */

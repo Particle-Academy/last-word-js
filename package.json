@@ -1,6 +1,6 @@
 {
   "name": "@particle-academy/last-word",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Zero-dependency, isomorphic docx writer/reader for agentic word-processing documents — JSON model + markdown bridges. Sister to holy-sheet (xlsx) and dark-slide (pptx). The Node/TypeScript mirror of the PHP particle-academy/last-word.",
   "repository": {
     "type": "git",

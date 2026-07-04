@@ -15,7 +15,7 @@ import { Validator } from "./schema/validator";
 import { DocxWriter } from "./writer/docx-writer";
 
 /** Feature-parity baseline with PHP last-word; bumped independently on npm. */
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
