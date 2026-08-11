@@ -19,6 +19,23 @@ jobs:
         with:
           node-version: "22"
 
+      # PHP is REQUIRED, not optional. tests/parity.test.ts is the cross-engine
+      # writer guarantee, and it throws in CI when php is absent rather than
+      # skipping — because a skip here is a green build with zero parity
+      # coverage, which is exactly how the holy-sheet and dark-slide suites
+      # reported success over nothing for months.
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          coverage: none
+          extensions: mbstring, zip
+
+      - name: Check out the PHP last-word
+        uses: actions/checkout@v4
+        with:
+          repository: Particle-Academy/last-word
+          path: .php-last-word
+
       - name: Install
         run: npm install --no-audit --no-fund
 
@@ -27,6 +44,12 @@ jobs:
 
       - name: Test
         run: npm test
+        env:
+          # The parity helper autoloads the PHP sources from here. Without it
+          # the helper falls back to ../../last-word/src, which only resolves
+          # inside the .agi envelope — so outside it the suite would find no
+          # classes at all.
+          LAST_WORD_PHP_SRC: ${{ github.workspace }}/.php-last-word/src
 
       - name: Build
         run: npm run build

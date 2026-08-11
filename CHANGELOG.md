@@ -1,5 +1,61 @@
 # Changelog
 
+All notable changes to `@particle-academy/last-word` are documented here.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- **Cross-engine WRITER parity against the PHP `last-word`** — the guarantee
+  this pair was missing. `cross-read.test.ts` already proved the Node *reader*
+  restores a frozen docx PHP wrote; nothing compared the two *writers*. Both
+  siblings in this family (`holy-sheet`, `dark-slide`) diff PHP output against
+  Node's; this one did not, so the engines could drift apart on anything the
+  frozen fixture happened not to contain.
+
+  Five documents — minimal, every inline mark, structure (lists / table /
+  quote), non-ASCII (CJK, emoji, combining marks), and empty-vs-zero values —
+  written by both engines and diffed part by part. Containers are never
+  byte-compared: PHP writes DEFLATE with real mtimes, this port writes STORE
+  with a fixed 1980 date, so the files can never match and it would be wrong to
+  try.
+
+  **PHP is REQUIRED in CI**, and the suite throws rather than skipping when it
+  is absent. A skip is a green build with zero parity coverage, which is how the
+  other two suites in this family reported success over nothing for months.
+
+### Notes
+
+- **The pair is NOT at parity, and the first run of the new suite proved it.**
+  Four parts differ, and they drift in BOTH directions — so this is not "the
+  port is behind":
+
+  | part | difference |
+  |---|---|
+  | `word/document.xml` | hyperlinks: port emits `w:history="1"`, PHP does not · lists: PHP emits `<w:pStyle w:val="ListParagraph"/>`, port does not · tables: port references `<w:tblStyle w:val="LastWordTable"/>`, PHP inlines `<w:tblBorders>` |
+  | `word/styles.xml` | port emits `w:eastAsia="Calibri"` |
+  | `word/numbering.xml` | port emits `<w:multiLevelType w:val="hybridMultilevel"/>` |
+  | `[Content_Types].xml` | PHP declares png/jpeg defaults unconditionally |
+
+  **The table difference is user-visible**: borders from a named style versus
+  borders written into the table properties. A table written by one backend is
+  not the same object as one written by the other.
+
+  Recorded in `KNOWN_DIVERGENT_PARTS` rather than fixed, because reconciling
+  them changes rendered output for every existing consumer, and in several cases
+  the port is arguably the more correct side — so "make the port match PHP", the
+  obvious move given PHP is the reference, would remove the better behaviour.
+  That is the pair owner's decision, not a side effect of writing the suite that
+  found it.
+
+  The list ratchets both ways: a new divergent part fails, and an entry that
+  stops being true fails too. `word/document.xml` for the *minimal* document is
+  asserted identical unconditionally — whatever else drifts, the engines must
+  agree on a single plain paragraph.
+
 ## 0.3.0 — 2026-08-07
 
 ### Changed
