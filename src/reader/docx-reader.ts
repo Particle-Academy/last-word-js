@@ -13,7 +13,7 @@ import { base64Encode } from "../helpers/image-size";
 import type { Block, Doc, ListItem, Run } from "../schema/types";
 import { unzipSync } from "../zip";
 import { at, el, els, parseXml, type XmlNode } from "./xml";
-import { EMU_PER_PX, SDT_TAG_CODE, SDT_TAG_QUOTE } from "../writer/docx-writer";
+import { EMU_PER_PX, SDT_TAG_CODE, SDT_TAG_QUOTE, splitColumns, PAGE_SIZES } from "../writer/docx-writer";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -84,7 +84,58 @@ export class DocxReader {
 
     const title = this.readTitle();
     if (title !== null) doc.title = title;
+
+    // Section geometry and document defaults are surfaced ONLY when they
+    // differ from what the writer produces unasked, for the same reason table
+    // options are: a Letter portrait page at one-inch margins is what every
+    // document written before `page` existed contains.
+    const page = this.readPage(el(body, "sectPr"));
+    if (page !== null) doc.page = page as Any;
+    const defaults = this.readDocDefaults();
+    if (defaults.font !== null) (doc as Any).defaultFont = defaults.font;
+    if (defaults.size !== null) (doc as Any).defaultSize = defaults.size;
+
     return doc;
+  }
+
+  private readPage(sectPr: XmlNode | undefined): Record<string, unknown> | null {
+    if (!sectPr) return null;
+    const out: Record<string, unknown> = {};
+
+    const pgSz = el(sectPr, "pgSz");
+    let w = numAttr(pgSz, "w") ?? 12240;
+    let h = numAttr(pgSz, "h") ?? 15840;
+    if (at(pgSz, "orient") === "landscape") {
+      out.orientation = "landscape";
+      [w, h] = [h, w];
+    }
+    for (const [name, dims] of Object.entries(PAGE_SIZES)) {
+      if (dims[0] === w && dims[1] === h && name !== "letter") out.size = name;
+    }
+
+    const pgMar = el(sectPr, "pgMar");
+    const margins: Record<string, number> = {};
+    for (const side of BOX_EDGES) {
+      const value = numAttr(pgMar, side);
+      if (value !== null && value !== 1440) margins[side] = points(value);
+    }
+    if (Object.keys(margins).length > 0) out.margins = margins;
+
+    return Object.keys(out).length > 0 ? out : null;
+  }
+
+  private readDocDefaults(): { font: string | null; size: number | null } {
+    const xml = this.partText("word/styles.xml");
+    if (!xml) return { font: null, size: null };
+    const rPr = el(el(el(parseXml(xml), "docDefaults"), "rPrDefault"), "rPr");
+
+    const ascii = at(el(rPr, "rFonts"), "ascii");
+    const sz = numAttr(el(rPr, "sz"), "val");
+
+    return {
+      font: ascii !== undefined && ascii !== "" && ascii !== "Calibri" ? ascii : null,
+      size: sz !== null && sz !== 22 ? sz / 2 : null,
+    };
   }
 
   // ── Parts / metadata ─────────────────────────────────────────────────────
@@ -201,6 +252,14 @@ export class DocxReader {
         }
         case "tbl":
           flushAll();
+          // Drop the pad the writer puts BETWEEN adjacent tables — the one
+          // that stops Word merging them. Deliberately narrow: only an empty
+          // paragraph sandwiched between two tables goes, so a blank line an
+          // author actually wrote still survives the read.
+          if (blocks.length >= 2 && isEmptyParagraph(blocks[blocks.length - 1]) &&
+              (blocks[blocks.length - 2] as Any)?.type === "table") {
+            blocks.pop();
+          }
           blocks.push(this.parseTable(node, ctx));
           break;
         case "sdt": {
@@ -291,7 +350,7 @@ export class DocxReader {
     if (headingMatch || outlineLvl !== undefined) {
       const raw = headingMatch ? parseInt(headingMatch[1]!, 10) : parseInt(outlineLvl ?? "0", 10) + 1;
       const level = Math.min(6, Math.max(1, raw)) as 1 | 2 | 3 | 4 | 5 | 6;
-      blocks.push({ type: "heading", level, runs });
+      blocks.push({ type: "heading", level, runs, ...paragraphPropsFrom(pPr) });
       for (const d of drawings) blocks.push(...this.parseDrawing(d));
       return { kind: "blocks", blocks };
     }
@@ -311,10 +370,7 @@ export class DocxReader {
 
     // Plain (or quote-styled) paragraph.
     if (text !== "" || drawings.length === 0) {
-      const para: Block = { type: "paragraph", runs };
-      const jc = at(el(pPr, "jc"), "val");
-      if (jc === "center" || jc === "right") (para as Any).align = jc;
-      else if (jc === "both" || jc === "distribute" || jc === "justify") (para as Any).align = "justify";
+      const para: Block = { type: "paragraph", runs, ...paragraphPropsFrom(pPr) };
       blocks.push(para);
     }
     for (const d of drawings) blocks.push(...this.parseDrawing(d));
@@ -400,9 +456,24 @@ export class DocxReader {
     const u = el(rPr, "u");
     if (u && (at(u, "val") ?? "single") !== "none") run.underline = true;
 
+    if (onFlag(el(rPr, "smallCaps"))) run.smallCaps = true;
+
     const rStyle = at(el(rPr, "rStyle"), "val") ?? "";
-    const asciiFont = (at(el(rPr, "rFonts"), "ascii") ?? "").toLowerCase();
+    const ascii = at(el(rPr, "rFonts"), "ascii");
+    const asciiFont = (ascii ?? "").toLowerCase();
     if (/^InlineCode$/i.test(rStyle) || MONO_FONTS.includes(asciiFont)) run.code = true;
+    // A `code` run's Consolas came FROM `code`, so surfacing it as `font` too
+    // would hand back a bigger model than went in — and the next write would
+    // then differ from the one just read.
+    else if (ascii !== undefined && ascii !== "") run.font = ascii;
+
+    const sz = numAttr(el(rPr, "sz"), "val");
+    if (sz !== null) run.size = sz / 2;
+
+    // Tracking of zero is the writer's "absent", so a zero here would be a
+    // property nobody asked for.
+    const tracking = numAttr(el(rPr, "spacing"), "val");
+    if (tracking !== null && tracking !== 0) run.letterSpacing = tracking / 20;
 
     if (link) run.link = link;
 
@@ -444,13 +515,109 @@ export class DocxReader {
 
   // ── Tables ───────────────────────────────────────────────────────────────
 
+  /**
+   * A table back into the model.
+   *
+   * Two things make this the hardest read in the package. First, the writer
+   * emits borders, cell margins and a `w:tcW` for every cell whether or not
+   * the model asked — so anything it would have produced anyway is NOT
+   * surfaced, or every document written before these options existed would
+   * come back carrying options nobody set. Second, the file contains the
+   * `w:vMerge` continuation cells the writer synthesised, and they have to be
+   * dropped and turned back into a `rowSpan` on the cell above.
+   */
   private parseTable(tbl: XmlNode, ctx: WalkCtx): Block {
-    const rows = els(tbl, "tr").map((tr) => {
+    const tblPr = el(tbl, "tblPr");
+    const grid = els(el(tbl, "tblGrid"), "gridCol").map((g) => numAttr(g, "w") ?? 0);
+    const table: Record<string, unknown> = { type: "table" };
+
+    const tblW = el(tblPr, "tblW");
+    if (at(tblW, "type") === "pct") {
+      const w = numAttr(tblW, "w");
+      if (w !== null) table.width = Math.round((w / 50) * 100) / 100;
+    }
+
+    const jc = at(el(tblPr, "jc"), "val");
+    if (jc === "center" || jc === "right") table.align = jc;
+
+    const borders = bordersFrom(el(tblPr, "tblBorders"), TABLE_EDGES);
+    if (borders && !isDefaultTableBorders(borders)) table.borders = borders;
+
+    const padding = sidesFrom(el(tblPr, "tblCellMar"));
+    if (padding && !isDefaultCellMargins(padding)) table.cellPadding = padding;
+
+    // Weights are only surfaced when the grid is NOT what an equal split
+    // would have produced — compared against the split the writer computes,
+    // not tested for exact equality, so a three-column table whose width does
+    // not divide by three is still recognised as equal.
+    const total = grid.reduce((a, b) => a + b, 0);
+    if (grid.length > 0 && total > 0 && !sameGrid(grid, splitColumns(total, grid.length))) {
+      table.widths = grid.map((w) => Math.round((w / total) * 10000) / 100);
+    }
+
+    // Pass 1: read every emitted cell, keeping its grid column and merge state.
+    interface Slot {
+      col: number;
+      span: number;
+      vMerge: string | null;
+      cell: Record<string, unknown> | null;
+    }
+    const laid: Slot[][] = els(tbl, "tr").map((tr) => {
       const header = el(el(tr, "trPr"), "tblHeader") !== undefined;
-      const cells = els(tr, "tc").map((tc) => ({ blocks: this.walkBody(tc.children, ctx) }));
+      const slots: Slot[] = [];
+      let col = 0;
+      for (const tc of els(tr, "tc")) {
+        const tcPr = el(tc, "tcPr");
+        const span = numAttr(el(tcPr, "gridSpan"), "val") ?? 1;
+        const vMergeEl = el(tcPr, "vMerge");
+        const vMerge = vMergeEl ? (at(vMergeEl, "val") ?? "continue") : null;
+
+        let cell: Record<string, unknown> | null = null;
+        if (vMerge !== "continue") {
+          cell = { blocks: this.walkBody(tc.children, ctx) };
+
+          const fill = at(el(tcPr, "shd"), "fill");
+          // A header row's grey came FROM `header`, so it is attributable and
+          // not surfaced. Any other fill is the author's.
+          if (fill !== undefined && fill !== "auto" && !(header && fill.toUpperCase() === HEADER_FILL)) {
+            cell.shading = `#${fill.toUpperCase()}`;
+          }
+          const cellBorders = bordersFrom(el(tcPr, "tcBorders"), BOX_EDGES);
+          if (cellBorders) cell.borders = cellBorders;
+          const cellPadding = sidesFrom(el(tcPr, "tcMar"));
+          if (cellPadding) cell.padding = cellPadding;
+          const valign = at(el(tcPr, "vAlign"), "val");
+          if (valign === "top" || valign === "center" || valign === "bottom") cell.valign = valign;
+          if (span > 1) cell.colSpan = span;
+        }
+
+        slots.push({ col, span, vMerge, cell });
+        col += span;
+      }
+      return slots;
+    });
+
+    // Pass 2: fold each run of continuations back into the cell that started it.
+    laid.forEach((line, r) => {
+      for (const slot of line) {
+        if (slot.vMerge !== "restart" || !slot.cell) continue;
+        let covered = 1;
+        for (let below = r + 1; below < laid.length; below++) {
+          const match = laid[below]!.find((s) => s.col === slot.col && s.vMerge === "continue");
+          if (!match) break;
+          covered++;
+        }
+        if (covered > 1) slot.cell.rowSpan = covered;
+      }
+    });
+
+    table.rows = laid.map((line, r) => {
+      const header = el(el(els(tbl, "tr")[r]!, "trPr"), "tblHeader") !== undefined;
+      const cells = line.filter((s) => s.cell !== null).map((s) => s.cell!);
       return header ? { header: true, cells } : { cells };
     });
-    return { type: "table", rows } as Block;
+
+    return table as unknown as Block;
   }
 
   // ── Images ───────────────────────────────────────────────────────────────
@@ -488,6 +655,146 @@ export class DocxReader {
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Paragraph properties back into the model — the same set `paragraph`,
+ * `heading` and a list item all accept.
+ */
+function paragraphPropsFrom(pPr: XmlNode | undefined): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!pPr) return out;
+
+  const jc = at(el(pPr, "jc"), "val");
+  if (jc === "center" || jc === "right") out.align = jc;
+  else if (jc === "both" || jc === "distribute" || jc === "justify") out.align = "justify";
+
+  const spacing = el(pPr, "spacing");
+  const before = numAttr(spacing, "before");
+  if (before !== null) out.spaceBefore = points(before);
+  const after = numAttr(spacing, "after");
+  if (after !== null) out.spaceAfter = points(after);
+  const line = numAttr(spacing, "line");
+  if (line !== null && at(spacing, "lineRule") === "auto") {
+    out.lineHeight = Math.round((line / 240) * 1000) / 1000;
+  }
+
+  const ind = el(pPr, "ind");
+  const left = numAttr(ind, "left");
+  if (left !== null) out.indentLeft = points(left);
+  const right = numAttr(ind, "right");
+  if (right !== null) out.indentRight = points(right);
+
+  if (onFlag(el(pPr, "keepNext"))) out.keepNext = true;
+
+  const fill = at(el(pPr, "shd"), "fill");
+  if (fill !== undefined && fill !== "auto") out.shading = `#${fill.toUpperCase()}`;
+
+  const borders = bordersFrom(el(pPr, "pBdr"), BOX_EDGES);
+  if (borders) out.borders = borders;
+
+  return out;
+}
+
+/** A paragraph carrying no runs and no properties — the adjacent-table pad. */
+function isEmptyParagraph(block: Block | undefined): boolean {
+  const b = block as Any;
+  return (
+    b?.type === "paragraph" &&
+    Array.isArray(b.runs) &&
+    b.runs.length === 0 &&
+    Object.keys(b).length === 2
+  );
+}
+
+/** A numeric attribute, or null when absent or unparseable. */
+function numAttr(node: XmlNode | undefined, name: string): number | null {
+  const raw = at(node, name);
+  if (raw === undefined) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Twips → points, kept exact for the halves the writer can emit. */
+function points(twips: number): number {
+  return Math.round((twips / 20) * 100) / 100;
+}
+
+const BOX_EDGES = ["top", "right", "bottom", "left"] as const;
+const TABLE_EDGES = [...BOX_EDGES, "insideH", "insideV"] as const;
+
+/** The header-cell grey, shared with the writer and both sibling engines. */
+const HEADER_FILL = "E7E7E7";
+
+/**
+ * Is this exactly what the writer emits for a table that asked for nothing?
+ *
+ * Not a tolerance and not a heuristic: the writer's defaults are a fixed set,
+ * and anything differing from them by one edge or one twip is the author's and
+ * must survive the read.
+ */
+function isDefaultTableBorders(borders: Record<string, unknown>): boolean {
+  const edges = Object.keys(borders);
+  if (edges.length !== TABLE_EDGES.length) return false;
+  return TABLE_EDGES.every((edge) => {
+    const b = borders[edge] as Record<string, unknown> | undefined;
+    // The default edge is single / 0.5pt / auto, which reads back as width
+    // alone — style and colour are both the omitted default.
+    return b !== undefined && Object.keys(b).length === 1 && b.width === 0.5;
+  });
+}
+
+function isDefaultCellMargins(sides: Record<string, number>): boolean {
+  return (
+    Object.keys(sides).length === 4 &&
+    sides.top === 3 && sides.bottom === 3 && sides.left === 5.4 && sides.right === 5.4
+  );
+}
+
+function sameGrid(a: number[], b: number[]): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+/**
+ * One border edge back into the model.
+ *
+ * Defaults are NOT surfaced: `style` only when it is not `single`, `color`
+ * only when it is not `auto`. Otherwise reading a document written from a
+ * model returns a bigger model than went in, and writing that model back
+ * produces a different file.
+ */
+function borderFrom(node: XmlNode | undefined): Record<string, unknown> | null {
+  if (!node) return null;
+  const val = at(node, "val") ?? "single";
+  if (val === "nil" || val === "none") return { style: "none" };
+
+  const out: Record<string, unknown> = {};
+  if (val !== "single") out.style = val;
+  const sz = numAttr(node, "sz");
+  if (sz !== null) out.width = Math.round((sz / 8) * 1000) / 1000;
+  const color = at(node, "color");
+  if (color !== undefined && color !== "auto") out.color = `#${color.toUpperCase()}`;
+  return out;
+}
+
+function bordersFrom(container: XmlNode | undefined, edges: readonly string[]): Record<string, unknown> | null {
+  if (!container) return null;
+  const out: Record<string, unknown> = {};
+  for (const edge of edges) {
+    const border = borderFrom(el(container, edge));
+    if (border) out[edge] = border;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function sidesFrom(container: XmlNode | undefined): Record<string, number> | null {
+  if (!container) return null;
+  const out: Record<string, number> = {};
+  for (const side of BOX_EDGES) {
+    const w = numAttr(el(container, side), "w");
+    if (w !== null) out[side] = points(w);
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
 
 /** True when a toggle property element is present and not explicitly off. */
 function onFlag(node: XmlNode | undefined): boolean {
@@ -532,7 +839,13 @@ export function mergeRuns(runs: Run[]): Run[] {
 }
 
 function sameProps(a: Run, b: Run): boolean {
-  const keys = ["bold", "italic", "underline", "strike", "code", "link", "color", "highlight"] as const;
+  // Every property a run can carry. A key missing from this list makes two
+  // differently-formatted runs merge into one, silently taking the first
+  // one's formatting — so it grows whenever the run model does.
+  const keys = [
+    "bold", "italic", "underline", "strike", "code", "link", "color", "highlight",
+    "smallCaps", "size", "font", "letterSpacing",
+  ] as const;
   return keys.every((k) => (a[k] ?? undefined) === (b[k] ?? undefined));
 }
 
