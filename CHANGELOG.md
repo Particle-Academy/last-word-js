@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 0.4.0 — 2026-09-10
+
 ### Added
 
 - **A premium-document composition suite.** `PremiumDocumentTest` /
@@ -68,6 +70,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quietly becoming that engine's behaviour.
 
 ### Fixed
+- **`version()` reports the version this package actually ships as.** It
+  returned `0.2.0` from a 0.4.0 release. The constant had drifted because
+  nothing compared it to the packaging metadata — the same shape as every other
+  two-copies-of-one-number failure in this estate.
+
+  `VersionIsSingleSourcedTest` / `version.test.ts` now pins it, so the class is
+  closed rather than the instance fixed. `dark-slide-py` already had that
+  assertion and was the only engine in the family to catch itself.
+
 
 - **Adjacent tables no longer merge into one in Word.** OOXML merges two
   `<w:tbl>` elements that touch, imposing the first table's column grid on the
@@ -108,10 +119,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (discarding bold an author really asked for). Pinned as case `0042` rather
   than left as a surprise.
 
-- **Release order: `fancy-conformance` first.** The shared table is version
-  `0.7.0`, which is not on a registry yet, so this package's dev dependency
-  cannot resolve and its lockfile cannot be regenerated until that release
-  lands. Nothing about the runtime surface depends on it — only the test that
+- **`fancy-conformance` is a dev dependency only.** The shared table is on the
+  registry at `0.20.0` and this package requires `^0.20.0`, so nothing here is
+  gated on it. (An earlier draft of this entry said the release was BLOCKED on
+  `fancy-conformance` 0.7.0 reaching a registry. That was true when it was
+  written and stopped being true thirteen minors ago — the note outlived the
+  condition, which is the failure mode of writing a blocker down and not dating
+  it.) Nothing about the runtime surface depends on it; only the test that
   asserts the shared rows.
 
 - **What DOCX cannot do, so nobody chases it:** table corners are always

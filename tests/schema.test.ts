@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { Agent, SchemaException, Schema, Validator } from "../src";
+import { Agent, SchemaException, Schema, Validator, VERSION } from "../src";
 import canonical from "../test/fixtures/canonical.json";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -110,8 +110,13 @@ describe("jsonSchema / version", () => {
     expect(schema.definitions.block.properties.type.enum).toEqual([...Schema.BLOCK_TYPES]);
   });
 
-  it("reports its version", () => {
-    expect(Agent.version()).toBe("0.2.0");
+  it("reports its version, which is the PACKAGE version", () => {
+    // This used to hardcode "0.2.0", which pinned the drift rather than the
+    // contract — the constant stayed at 0.2.0 across two minor releases and this
+    // assertion is why nothing noticed. `version.test.ts` now ties it to
+    // package.json, so the number has one source and this test does not have to
+    // be edited every release.
+    expect(Agent.version()).toBe(VERSION);
   });
 
   it("exposes the Validator service directly", () => {
