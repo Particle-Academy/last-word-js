@@ -69,7 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   naming more sectors than the file holds, is refused; the Word piece table
   must run forwards; an ODT part carrying a DOCTYPE is refused; only the three
   ODT parts read are inflated, each refused past 64 MB declared or actual (a
-  zip bomb stops at the cap); repeated rows and columns are capped at 1,000
+  zip bomb stops at the cap); ODT element nesting past 257 is refused, the
+  limit libxml puts on the PHP engine; repeated rows and columns are capped at 1,000
   per repeat and 100,000 cells in total; RTF nesting is capped at 10,000 and
   `\bin` data is skipped by its length. Each guard has a test on a hand-built
   file (`tests/support/legacy-files.ts`).

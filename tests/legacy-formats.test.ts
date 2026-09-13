@@ -248,6 +248,16 @@ describe("damaged and hostile files fail fast, and say what is wrong", () => {
     damaged(L.odt("", xml), "DOCTYPE");
   });
 
+  it("parses an ODT part nested 257 elements deep and refuses one nested 258", () => {
+    // libxml's limit without XML_PARSE_HUGE, which the PHP engine inherits. The
+    // part's own wrappers are four deep (document-content, body, text, p).
+    const nested = (spans: number): Uint8Array =>
+      L.odt("<text:p>" + "<text:span>".repeat(spans) + "deep" + "</text:span>".repeat(spans) + "</text:p>");
+
+    expect(texts((Agent.read(nested(253)) as Any).blocks)).toEqual(["deep"]);
+    damaged(nested(254), "Could not parse content.xml");
+  });
+
   it("caps an ODT space run of two billion", () => {
     const doc: Any = Agent.read(L.odt('<text:p>a<text:s text:c="2000000000"/>b</text:p>'));
     expect(doc.blocks[0].runs[0].text).toHaveLength(1002);

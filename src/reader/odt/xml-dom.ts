@@ -22,6 +22,9 @@ export interface DomElement {
 
 export type DomNode = DomElement | string;
 
+/** The deepest element nesting libxml 2.11 parses without XML_PARSE_HUGE (measured: 257 opens, 258 fails). */
+const MAX_ELEMENT_DEPTH = 257;
+
 export function isElement(node: DomNode | undefined): node is DomElement {
   return typeof node === "object" && node !== null;
 }
@@ -88,6 +91,10 @@ export function parseDom(src: string): DomElement {
     const selfClosing = inner.endsWith("/");
     if (selfClosing) inner = inner.slice(0, -1);
     const element = startTag(inner);
+    // libxml, which the PHP engine parses with, refuses an element nested
+    // deeper than 257 levels without XML_PARSE_HUGE. Refusing at the same depth
+    // keeps the engines agreeing and bounds every recursive walk after this.
+    if (stack.length > MAX_ELEMENT_DEPTH) throw new Error("the document nests elements too deeply");
     const parent = stack[stack.length - 1]!;
     if (parent === root && root.children.length > 0) throw new Error("more than one root element");
     parent.children.push(element);
