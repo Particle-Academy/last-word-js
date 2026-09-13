@@ -4,10 +4,14 @@
  * and Node-only (browsers have no sync FS).
  */
 
-import { SchemaException } from "./exceptions";
+import { SchemaException, UnsupportedFormatException } from "./exceptions";
 import { fromMarkdown } from "./markdown/from-markdown";
 import { toMarkdown } from "./markdown/to-markdown";
+import { DocReader } from "./reader/doc-reader";
 import { DocxReader } from "./reader/docx-reader";
+import { Format, detectFormat } from "./reader/format";
+import { OdtReader } from "./reader/odt-reader";
+import { RtfReader } from "./reader/rtf-reader";
 import { Repairer } from "./schema/repairer";
 import { Schema } from "./schema/schema";
 import type { Block, Doc, ListItem, RepairResult, ValidationError, WriteResult } from "./schema/types";
@@ -15,7 +19,7 @@ import { Validator } from "./schema/validator";
 import { DocxWriter } from "./writer/docx-writer";
 
 /** This package's own version, pinned to package.json by `version.test.ts`. */
-export const VERSION = "0.4.0";
+export const VERSION = "0.5.0";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -78,14 +82,45 @@ export const Agent = {
     return { path, bytes: bytes.length, blocks: doc?.blocks?.length ?? 0 };
   },
 
-  /** Read .docx bytes back into the Doc model. Universal. */
+  /**
+   * Read a document back into the Doc model. Universal. The format is decided
+   * from the CONTENT: .docx, legacy .doc (Word 97-2003), .odt and .rtf all
+   * return the same shape. Mirrors PHP `Agent::read()`.
+   *
+   * Throws `UnsupportedFormatException` for bytes that are none of those,
+   * naming what they are when that is knowable (`xls`, `pptx`, …), and a plain
+   * `Error` for a file in a supported format that is damaged.
+   */
   read(input: Uint8Array | ArrayBuffer): Doc {
-    return new DocxReader().read(toU8(input));
+    const bytes = toU8(input);
+    const format = detectFormat(bytes);
+    switch (format) {
+      case Format.DOCX:
+        return new DocxReader().read(bytes);
+      case Format.ODT:
+        return new OdtReader().read(bytes);
+      case Format.RTF:
+        return new RtfReader().read(bytes);
+      case Format.DOC:
+        // A compound file: DocReader reads a Word document and names anything
+        // else (.xls, .ppt, .msg) itself, because only the container knows.
+        return new DocReader().read(bytes);
+      case Format.UNKNOWN:
+        throw new UnsupportedFormatException(
+          Format.UNKNOWN,
+          "Agent.read() could not recognise these bytes as a document. It reads .docx, .doc (Word 97-2003), .odt and .rtf.",
+        );
+      default:
+        throw new UnsupportedFormatException(
+          format,
+          `This is a .${format} file, not a word-processing document. Agent.read() reads .docx, .doc (Word 97-2003), .odt and .rtf.`,
+        );
+    }
   },
 
   /** Alias for {@see read}. */
   fromBytes(input: Uint8Array | ArrayBuffer): Doc {
-    return new DocxReader().read(toU8(input));
+    return this.read(input);
   },
 
   /** Doc → GFM markdown (the Editor bridge). */

@@ -67,9 +67,10 @@ code?, link?, color?, highlight? }` (colors are `#RRGGBB`).
   clamps heading levels, drops unknown block types with the error retained)
 - `toBytes(doc)` → `Uint8Array` (universal, deterministic output)
 - `write(doc, path)` → `{path, bytes, blocks}` (Node only)
-- `read(bytes)` / `fromBytes(bytes)` → `Doc` (universal; tolerates
+- `read(bytes)` / `fromBytes(bytes)` → `Doc` (universal; reads `.docx`,
+  legacy `.doc`, `.odt` and `.rtf`, decided from the bytes; tolerates
   Word-authored files — outlineLvl headings, named highlights, unknown
-  constructs degrade to paragraphs, never throw)
+  constructs degrade to paragraphs)
 - `toMarkdown(doc)` / `fromMarkdown(md)` → the Editor bridge (GFM: headings,
   `**`/`*`/`~~`, inline code, links, nested lists, tables, fenced code,
   blockquotes, images, `---`)
@@ -84,6 +85,31 @@ dropped on `toMarkdown`; everything else round-trips.
 Images are embedded from data URLs (PNG/JPEG); when `widthPx`/`heightPx` are
 omitted the intrinsic size is sniffed from the bytes (PNG IHDR / JPEG SOF)
 and capped at 6.5in width keeping aspect.
+
+## Reading .doc, .odt and .rtf
+
+`Agent.read()` decides the format from the bytes, never a file name, and
+returns the same document shape for all four:
+
+| Format | Comes through | Does not |
+|---|---|---|
+| `.docx` | everything above | — |
+| `.doc` (Word 97-2003) | paragraphs, headings (by built-in style, so localised names work), direct bold / italic / underline / strike, hyperlinks, nested bulleted and numbered lists, tables with header rows, page breaks | style-inherited formatting, fonts / sizes / colours, images, text boxes, headers / footers / footnotes / comments, merged cells, title |
+| `.odt` | headings, paragraphs, bold / italic / underline / strike, hyperlinks, nested lists, tables with header rows and merged cells, spaces / tabs / line breaks, page breaks, title | images and frames, footnotes, comments, tracked deletions, fonts / sizes / colours |
+| `.rtf` | headings (style name or outline level), direct bold / italic / underline / strike, hyperlinks, nested lists, tables (header rows where `\trhdr` marks them), Unicode, `\ansicpg` code pages, title | images and objects, footnotes, headers / footers, fonts / sizes / colours, merged cells, double-byte code pages written as raw bytes |
+
+The compound-file (MS-CFB) and Word binary (MS-DOC) readers are this
+package's own code: still zero dependencies. A document converted from
+`.docx` to `.doc` and `.odt` by LibreOffice reads back identical to the
+`.docx`; the `.rtf` differs only in a header-row flag LibreOffice does not
+write. The PHP and Python engines assert the same result on the same bytes
+(`test/fixtures/formats/report.read.json`).
+
+What it cannot read it refuses with `UnsupportedFormatException`, whose
+`format` names what the bytes are: `doc` for a Word 6/95 or encrypted file,
+`xls`, `ppt`, `msg` or `cfb` for another compound file, `xlsx`, `pptx`,
+`ods`, `odp`, or `unknown`. A damaged file in a supported format throws a
+plain `Error` instead.
 
 ## Cross-language parity
 

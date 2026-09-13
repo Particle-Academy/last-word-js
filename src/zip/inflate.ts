@@ -149,7 +149,11 @@ function decodeTrees(d: Reader, lt: Tree, dt: Tree): void {
 class Out {
   buf = new Uint8Array(1024);
   len = 0;
+  constructor(private readonly limit: number) {}
   push(b: number): void {
+    if (this.len >= this.limit) {
+      throw new Error("inflated data is larger than allowed");
+    }
     if (this.len >= this.buf.length) {
       const next = new Uint8Array(this.buf.length * 2);
       next.set(this.buf);
@@ -161,6 +165,9 @@ class Out {
 
 function inflateBlockData(d: Reader, out: Out, lt: Tree, dt: Tree): void {
   for (;;) {
+    // Reading past the end yields zero bits forever; a truncated stream must
+    // stop here rather than decode them.
+    if (d.index > d.source.length) throw new Error("DEFLATE stream is truncated");
     const sym = decodeSymbol(d, lt);
     if (sym === 256) return;
     if (sym < 256) {
@@ -184,9 +191,13 @@ function inflateUncompressedBlock(d: Reader, out: Out): void {
   for (; length; length--) out.push(d.source[d.index++]!);
 }
 
-export function inflateRaw(source: Uint8Array): Uint8Array {
+/**
+ * Inflate a raw DEFLATE stream. `maxBytes` caps the output, so a small archive
+ * entry cannot expand without bound (a zip bomb); it throws when exceeded.
+ */
+export function inflateRaw(source: Uint8Array, maxBytes = Number.POSITIVE_INFINITY): Uint8Array {
   const d = new Reader(source);
-  const out = new Out();
+  const out = new Out(maxBytes);
   const lt = new Tree();
   const dt = new Tree();
   let bfinal: number;
@@ -204,6 +215,7 @@ export function inflateRaw(source: Uint8Array): Uint8Array {
     } else {
       throw new Error("dark-slide: invalid DEFLATE block type");
     }
+    if (d.index > source.length) throw new Error("DEFLATE stream is truncated");
   } while (!bfinal);
   return out.buf.subarray(0, out.len);
 }

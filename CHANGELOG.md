@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 0.5.0 — 2026-09-13
+
+### Added
+
+- **`Agent.read()` reads legacy Word `.doc` (Word 97-2003), `.odt` and `.rtf`,
+  not just `.docx`** (last-word#1), matching the PHP engine. The format is
+  decided from the bytes, never a file name, and all four return the same
+  document shape. The compound-file (MS-CFB) and Word binary (MS-DOC) readers
+  are this package's own code; there is still no dependency.
+
+  - `.doc`: paragraph text from every piece (8-bit and UTF-16), headings by
+    built-in style id, direct bold / italic / underline / strike, `HYPERLINK`
+    fields (other fields keep their result), nested bulleted and numbered
+    lists, tables with header rows, page breaks. Not read: style-inherited
+    formatting, fonts / sizes / colours, images, text boxes, headers / footers
+    / footnotes / comments, merged cells, the title.
+  - `.odt`: headings, paragraphs, bold / italic / underline / strike from
+    automatic styles, links, nested lists, tables with header rows and merged
+    cells, `text:s` / `text:tab` / `text:line-break`, page breaks, the title.
+  - `.rtf`: a group-scoped tokenizer; headings by style name or outline level,
+    direct formatting with style formatting subtracted, links, lists from the
+    list table, tables (header rows where `\trhdr` marks them), `\uN` with
+    `\ucN` skipping and surrogate pairs, `\'hh` in the `\ansicpg` code page
+    (874 and 1250-1258 decoded; 932/936/949/950 double-byte characters become
+    one U+FFFD each).
+
+  One document written by last-word and converted by LibreOffice reads back
+  from `.doc` and `.odt` IDENTICAL to the `.docx`, and from `.rtf` identical
+  except the header-row flag that file does not carry.
+  `legacy-formats.test.ts` asserts it against `report.read.json`, the same
+  committed answer the PHP and Python suites assert, compared as JSON text.
+
+- **`UnsupportedFormatException`**, with a `format` naming what the bytes are:
+  `doc` (Word 6/95 or encrypted), `xls` / `ppt` / `msg` / `cfb` (another
+  compound file), `xlsx` / `pptx` / `ods` / `odp`, or `unknown`. A damaged
+  file in a supported format throws a plain `Error`, because "this file is
+  broken" and "save it as .docx" send a person to do different things.
+
+- `DocReader`, `OdtReader`, `RtfReader`, `Format` and `detectFormat` are
+  exported beside `DocxReader`.
+
+### Changed
+
+- **`Agent.read()` of bytes that are not a docx throws
+  `UnsupportedFormatException`** where it used to fail inside the zip reader
+  with whatever error that produced. It extends `Error`, so a `catch` still
+  catches it; do nothing unless you matched the old message.
+
+### Fixed
+
+- **A truncated DEFLATE stream is an error, not garbage.** Inflating read past
+  the end of its input as zero bits and returned whatever those decoded to, so
+  a cut-off `.docx` part could come back as nonsense instead of failing.
+
+### Security
+
+- **Legacy readers treat an upload as hostile.** Compound-file offsets are
+  bounds-checked; sector chains, the DIFAT chain and the directory tree are
+  followed at most once per node; a stream over 256 MB, or an allocation table
+  naming more sectors than the file holds, is refused; the Word piece table
+  must run forwards; an ODT part carrying a DOCTYPE is refused; only the three
+  ODT parts read are inflated, each refused past 64 MB declared or actual (a
+  zip bomb stops at the cap); repeated rows and columns are capped at 1,000
+  per repeat and 100,000 cells in total; RTF nesting is capped at 10,000 and
+  `\bin` data is skipped by its length. Each guard has a test on a hand-built
+  file (`tests/support/legacy-files.ts`).
+
 ## 0.4.0 — 2026-09-10
 
 ### Added
