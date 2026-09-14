@@ -1,6 +1,6 @@
 # @particle-academy/last-word
 
-[![Fancy UI suite](art/fancy-ui.svg)](https://particle.academy)
+[![Fancified](art/fancified.svg)](https://particle.academy)
 
 Zero-dependency, **isomorphic** (browser + Node) `.docx` writer + reader for
 agentic word-processing documents — a JSON document model with **markdown
