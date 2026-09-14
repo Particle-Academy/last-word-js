@@ -1,9 +1,9 @@
-import { type Any, get, has, isArr, isDigits, isList, phpInt, valuesOf, withKey, withoutKey } from "./php";
+import { type Any, entriesOf, get, has, isArr, isDigits, isList, phpInt, valuesOf, withKey, withoutKey } from "./php";
 import type { DocOpKind } from "./types";
 
 /**
  * Apply `DocOpSchema` ops to a Last Word document, returning a new document.
- * Mirrors PHP `LastWord\Ops\DocReducer` as of 0.6.2, op for op (pinned against
+ * Mirrors PHP `LastWord\Ops\DocReducer` as of 0.6.3, op for op (pinned against
  * the PHP package by `tests/doc-ops-parity.test.ts`).
  *
  * Pure: the input is never modified. An op whose `path` does not reach a list of
@@ -110,13 +110,18 @@ const ACTIONS = ["insert", "remove", "move", "replace"];
  * Walk to the list at `tokens` and replace it with `change(list)`. A null
  * result (or an unreachable path) leaves the document as it was.
  *
- * As in PHP, a numeric token indexes a list, and a list reached by a key that is
- * not an index becomes a map: an insert at `/blocks/blocks` turns the blocks
- * list into an object holding the old blocks under "0", "1", … and the new list
- * under "blocks".
+ * A list is reached by position only. A token that is not digits on a non-empty
+ * list (the `blocks` in `/blocks/blocks`) does not resolve, and the op is
+ * skipped; before PHP 0.6.3 the insert turned the blocks list into a map. An
+ * EMPTY list still takes a name, as in PHP, which cannot tell `[]` from `{}`.
  */
 function edit(node: Any, tokens: readonly string[], change: (list: Any[] | null) => Any[] | null): Any {
   const [token, ...rest] = tokens as [string, ...string[]];
+
+  if (isList(node) && !isDigits(token) && entriesOf(node).length > 0) {
+    return node;
+  }
+
   const key = isList(node) && isDigits(token) ? String(phpInt(token)) : token;
 
   if (rest.length === 0) {

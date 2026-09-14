@@ -96,18 +96,6 @@ export function compareStrings(a: string, b: string): number {
   return x.length === y.length ? 0 : x.length < y.length ? -1 : 1;
 }
 
-/**
- * The key PHP stores for a string array key: a canonical decimal integer
- * ("5", "-12", not "05" or "-0") becomes an int, so `array_keys()` and JSON
- * give it back as a number. Kept a string past the safe-integer range, where a
- * JS number could not carry PHP's int.
- */
-export function phpKey(key: string): string | number {
-  if (!/^(0|-?[1-9][0-9]*)$/.test(key)) return key;
-  const n = Number(key);
-  return Number.isSafeInteger(n) ? n : key;
-}
-
 /** `$node[$key] = $value` on a copy. A JS array given a key that is not an index becomes a map, as a PHP list does. */
 export function withKey(node: Any, key: string, value: unknown): Any {
   if (Array.isArray(node)) {

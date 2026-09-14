@@ -42,7 +42,7 @@ export const DocOpSchema = {
       variant("doc.replace", { doc: { type: "object" } }, ["doc"], "Replace the whole document."),
       variant(
         "doc.set",
-        { key: { type: "string", not: { const: "blocks" } }, value: { description: "Any JSON value; null removes the key." } },
+        { key: { type: "string", minLength: 1, not: { const: "blocks" } }, value: { description: "Any JSON value; null removes the key." } },
         ["key", "value"],
         "Set a top-level property (title, page, defaultFont, defaultSize); null removes it.",
       ),

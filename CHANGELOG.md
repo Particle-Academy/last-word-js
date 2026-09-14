@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 0.6.1 — 2026-09-15
+
+### Fixed
+
+Mirrors `particle-academy/last-word` 0.6.3, whose fixes this port's 0.6.0
+reported. Each has a test that fails against 0.6.0, and the PHP parity suite
+runs against 0.6.3.
+
+- **`diff()` emits every `doc.set` `key` as a string.** 0.6.0 matched PHP 0.6.2,
+  which stored a top-level key `"5"` as the int 5 and emitted `key: 5`; the
+  reducer refuses a non-string key, so the replay check failed and the whole
+  diff became one `doc.replace`. It is now a `doc.set` with `key: "5"`, as PHP
+  0.6.3 emits.
+- **An op whose path names a non-empty list by a key is skipped.** An insert at
+  `/blocks/blocks` turned the top-level block list into an object holding the
+  old blocks under `"0"`, `"1"`, … A list is reached by position only. An empty
+  list still takes a name, as in PHP, which cannot tell `[]` from `{}`.
+- **`opSchema()` requires a non-empty `doc.set` `key`** (`minLength: 1`), as the
+  reducer does. The schema is still byte-identical to PHP's.
+
+  **What you must do:** nothing. A stored op list replays as before unless it
+  held one of the paths above, which no `diff()` emits; and a history that fell
+  back to `doc.replace` for a numeric key still replays correctly.
+
 ## 0.6.0 — 2026-09-15
 
 ### Added

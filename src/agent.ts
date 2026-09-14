@@ -24,7 +24,7 @@ import { Validator } from "./schema/validator";
 import { DocxWriter } from "./writer/docx-writer";
 
 /** This package's own version, pinned to package.json by `version.test.ts`. */
-export const VERSION = "0.6.0";
+export const VERSION = "0.6.1";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;

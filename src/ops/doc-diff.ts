@@ -1,6 +1,6 @@
 import { Agent } from "../agent";
 import { DocReducer } from "./doc-reducer";
-import { type Any, compareStrings, entriesOf, get, isArr, phpKey, valuesOf, withoutKey } from "./php";
+import { type Any, compareStrings, entriesOf, get, isArr, valuesOf, withoutKey } from "./php";
 import type { DocOp, DocOpKind } from "./types";
 
 /** PHP `json_encode`'s depth argument in `canon()`: more nested arrays and objects than this throw. */
@@ -15,7 +15,7 @@ const CONTAINERS: Record<string, readonly [string, DocOpKind]> = {
 
 /**
  * The op list that turns one Last Word document into another. Mirrors PHP
- * `LastWord\Ops\DocDiff` as of 0.6.2: the same algorithm, so the same inputs give
+ * `LastWord\Ops\DocDiff` as of 0.6.3: the same algorithm, so the same inputs give
  * the same ops in the same order in both runtimes (pinned against the PHP
  * package by `tests/doc-ops-parity.test.ts`).
  *
@@ -65,8 +65,10 @@ export const DocDiff = {
         continue;
       }
       if (!DocDiff.same(get(a, key), get(b, key))) {
-        // PHP stores "5" as the int 5, so its op says `"key": 5`.
-        ops.push({ op: "doc.set", key: phpKey(key), value: get(b, key) });
+        // Always a string. PHP stores "5" as the int 5 and, before 0.6.3, emitted
+        // `"key": 5`, which the reducer refuses: the replay check failed and the
+        // whole diff fell back to doc.replace. PHP casts it now.
+        ops.push({ op: "doc.set", key, value: get(b, key) });
       }
     }
 

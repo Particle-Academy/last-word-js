@@ -5,7 +5,7 @@ import { type Any, EDITS, deepFreeze, lwOpsDoc, p, randomBlockEdits } from "./do
 
 /*
  * Agent.diff / Agent.reduce / Agent.opSchema (last-word#2), ported case for case
- * from PHP `tests/Unit/DocOpsTest.php` (last-word 0.6.0).
+ * from PHP `tests/Unit/DocOpsTest.php` (last-word 0.6.3).
  *
  * What a version history built on these needs, pinned:
  *
@@ -48,10 +48,10 @@ describe("Agent.diff / Agent.reduce", () => {
     // `equivalent`, not from the two being the same JSON.
     expect(DocDiff.same(docBack, doc)).toBe(false);
 
-    // The canonical fixture. PHP's test says it "has constructs the reader
-    // normalises"; in fact it reads back as the same JSON, in PHP (checked on
-    // its own fixture and on this one) and here. So this line pins the
-    // literal-same path, and the two documents around it pin normalisation.
+    // The canonical fixture reads back as the same JSON, in PHP (checked on its
+    // own fixture and on this one) and here, so this line pins the literal-same
+    // path, and the two documents around it pin normalisation. (PHP's test said
+    // otherwise until 0.6.3, when this port checked.)
     const canonicalBack = Agent.read(Agent.toBytes(canonical));
     expect(Agent.diff(canonical, canonicalBack)).toEqual([]);
     expect(DocDiff.same(canonicalBack, canonical)).toBe(true);
@@ -174,5 +174,37 @@ describe("Agent.diff / Agent.reduce", () => {
 
     // Digit strings and ints still work.
     expect((Agent.reduce(d, { op: "blocks.remove", path: "/blocks", index: "1" } as Any).blocks as Any[]).length).toBe(d.blocks.length - 1);
+  });
+
+  // PHP 0.6.3. PHP stores the key "5" as the int 5 and emitted `key: 5`, which
+  // the reducer refuses, so the diff fell back to doc.replace. A JS object key
+  // is always a string, but 0.6.0 re-created PHP's int to match it.
+  it("keeps a small diff for a numeric top-level key, which PHP stores as an int", () => {
+    // Unknown top-level keys are not written, so another difference (the title)
+    // is what keeps these two documents from being the same file.
+    const a = deepFreeze({ title: "A", blocks: [p("x")], "5": "five" });
+    const b = deepFreeze({ title: "B", blocks: [p("x")], "5": "FIVE" });
+
+    const ops = Agent.diff(a, b);
+
+    expect(ops).toStrictEqual([
+      { op: "doc.set", key: "5", value: "FIVE" },
+      { op: "doc.set", key: "title", value: "B" },
+    ]);
+    expect(DocDiff.same(Agent.reduce(a, ops), b)).toBe(true);
+  });
+
+  // PHP 0.6.3: this insert turned the top-level blocks list into a map.
+  it("skips an op whose path names a list by a key instead of a position", () => {
+    const d = deepFreeze(lwOpsDoc());
+
+    expect(Agent.reduce(d, { op: "blocks.insert", path: "/blocks/blocks", index: 0, block: p("x") })).toStrictEqual(d);
+  });
+
+  // PHP 0.6.3.
+  it("refuses an empty doc.set key in the op schema, as the reducer does", () => {
+    const variant = (Agent.opSchema() as { oneOf: Any[] }).oneOf.find((v) => v.properties.op.const === "doc.set");
+
+    expect(variant.properties.key.minLength).toBe(1);
   });
 });

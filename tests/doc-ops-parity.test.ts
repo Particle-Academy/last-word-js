@@ -289,10 +289,10 @@ cases.push(
     b: { title: "U", blocks: [p("a")] },
   },
   {
-    // PHP stores the key "5" as the int 5, so diff() emits `doc.set` with
-    // `"key": 5`, which 0.6.2's reducer refuses as not a string: the replay
-    // check fails and the diff falls back to `doc.replace`. Correct, not small.
-    name: "a numeric top-level key changed falls back to doc.replace",
+    // PHP stores the key "5" as the int 5. Through 0.6.2 diff() emitted
+    // `"key": 5`, which the reducer refuses as not a string, so the replay check
+    // failed and the diff fell back to `doc.replace`. 0.6.3 emits "5".
+    name: "a numeric top-level key changed is a doc.set with a string key",
     a: { title: "x", "5": "y", blocks: [p("a")] },
     b: { title: "z", "5": "w", blocks: [p("a")] },
   },
@@ -366,8 +366,17 @@ cases.push(
     { op: "blocks.insert", path: "/a~1b/blocks", index: 1, block: p("escaped slash") },
     { op: "blocks.insert", path: "/m~0n/blocks", index: 0, block: p("into an empty object") },
     { op: "blocks.remove", path: "/x/blocks", index: 0 },
-    // PHP turns the blocks LIST into a map here rather than skipping.
+  ] },
+  // PHP 0.6.3: a non-empty list is reached by position only; an empty one still takes a name.
+  { name: "reduce: a list reached by name", a: { ...odd, e: [], obj: { "0": { blocks: [p("zero")] } } }, ops: [
     { op: "blocks.insert", path: "/blocks/blocks", index: 0, block: p("list reached by name") },
+    { op: "blocks.remove", path: "/blocks/x/blocks", index: 0 },
+    { op: "items.insert", path: "/blocks/3/items/children", index: 0, item: { runs: [{ text: "items by name" }] } },
+    { op: "blocks.insert", path: "/blocks/4/rows/1/cells/first/blocks", index: 0, block: p("cells by name") },
+    { op: "blocks.insert", path: "/obj/blocks", index: 0, block: p("a map keyed 0 is a list") },
+    { op: "blocks.insert", path: "/obj/0/blocks", index: 0, block: p("but a position reaches it") },
+    { op: "blocks.insert", path: "/e/blocks", index: 0, block: p("an empty list takes a name") },
+    { op: "blocks.insert", path: "/blocks/2/runs/0/blocks", index: 0, block: p("a map inside a list") },
   ] },
   { name: "reduce: doc ops and names that are not ops", a: lwOpsDoc(), ops: [
     { op: "doc.set", key: "", value: 1 },
@@ -489,7 +498,10 @@ describe.skipIf(!HAS_PHP)("cross-engine ops parity (PHP vs TS)", () => {
     expect(byName("a quote with more than half reworded is replaced")).toEqual(["blocks.replace"]);
     expect(byName("a list too long to align")).toHaveLength(501);
     expect(byName("a save of the ops document is no change")).toEqual([]);
-    expect(byName("a numeric top-level key changed falls back to doc.replace")).toEqual(["doc.replace"]);
+    expect(results[cases.findIndex((c) => c.name === "a numeric top-level key changed is a doc.set with a string key")].ops).toEqual([
+      { op: "doc.set", key: "5", value: "w" },
+      { op: "doc.set", key: "title", value: "z" },
+    ]);
   });
 
   it("publishes the same op schema, byte for byte", () => {
