@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 0.6.0 — 2026-09-15
+
+### Added
+
+- **`Agent.diff()`, `Agent.reduce()`, `Agent.opSchema()` and `Agent.equivalent()`:
+  a document's versions stored as ops** (last-word#2). Ported from
+  `particle-academy/last-word` 0.6.2, which is the reference (its 0.6.0 design
+  with the 0.6.1 and 0.6.2 fixes): the same algorithm, so the same two documents
+  give the same ops in the same order in both runtimes, and an op history
+  written by one replays in the other. A version history cannot keep a .docx
+  per edit, hashing the bytes cannot keep a one-word edit small (it is a zip),
+  and diffing `toMarkdown()` output would lose run formatting, tables and page
+  breaks on restore. The diff is over Last Word's own model.
+  - `reduce(a, diff(a, b))` equals `b`, key order aside. The ops are verified
+    by replaying them; ops that do not reproduce `b` become one `doc.replace`.
+  - Every list is aligned by content: the top-level blocks, a quote's blocks, a
+    list's items and their children, a table's rows, a row's cells and a cell's
+    blocks. Rewording one paragraph is one `blocks.replace` at its own path, even
+    inside a table cell; moving one is one `blocks.move`. A container whose own
+    properties changed is replaced whole.
+  - Documents that write the same file diff to `[]`, so a save without a change
+    records nothing, even where the reader normalises (merged runs, a header
+    row's bold, a dropped empty paragraph).
+  - Blocks have no ids, so ops address a list by JSON Pointer and an item by
+    index: `blocks.*`, `items.*`, `rows.*` and `cells.*`, each with
+    `insert`/`remove`/`move`/`replace`, plus `doc.set` and `doc.replace`.
+  - `reduce()` skips an op whose position is not an integer or a digit string,
+    or whose `op`, `path` or `doc.set` `key` is not a string, rather than reading
+    junk as position 0 (PHP 0.6.2).
+  - The equality `diff()` runs on throws a `TypeError` for a value JSON cannot
+    hold — a non-finite number, a string with a lone surrogate, a function,
+    symbol or bigint, or more than 4096 nested arrays and objects — rather than
+    calling two different ones the same (PHP 0.6.1 throws `JsonException`).
+
+  **What you must do:** nothing. This only adds methods.
+
+- **`DocOp`**, a discriminated union on `op` (with a type per op), plus
+  **`DocDiff`**, **`DocReducer`** and **`DocOpSchema`**, exported beside the
+  other building blocks.
+
+`tests/doc-ops-parity.test.ts` runs the PHP package's `Agent::diff` and
+`Agent::reduce` on every case and requires the same ops, field for field and in
+order, and the same replayed document: each edit PHP's own suite pins, both
+ways; seeded random edits at every depth; one entry moved in each kind of list;
+raw alignments, where ties decide the hunks; and reducer edge cases no diff
+emits. The op schema is compared byte for byte. Two differences cannot be
+removed, because JS values do not carry the distinction: PHP calls the JSON
+number `1.0` different from `1` (and skips `2.0` as a position), where this port
+sees one number; and PHP compares a map keyed 0..10 or more out of order as a
+map, where a JS object is always in key order. No valid document hits either.
+
 ## 0.5.0 — 2026-09-13
 
 ### Added

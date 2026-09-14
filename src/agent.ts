@@ -7,6 +7,11 @@
 import { SchemaException, UnsupportedFormatException } from "./exceptions";
 import { fromMarkdown } from "./markdown/from-markdown";
 import { toMarkdown } from "./markdown/to-markdown";
+import { DocDiff } from "./ops/doc-diff";
+import { DocOpSchema } from "./ops/doc-op-schema";
+import { DocReducer } from "./ops/doc-reducer";
+import { isList, valuesOf } from "./ops/php";
+import type { DocOp } from "./ops/types";
 import { DocReader } from "./reader/doc-reader";
 import { DocxReader } from "./reader/docx-reader";
 import { Format, detectFormat } from "./reader/format";
@@ -19,7 +24,7 @@ import { Validator } from "./schema/validator";
 import { DocxWriter } from "./writer/docx-writer";
 
 /** This package's own version, pinned to package.json by `version.test.ts`. */
-export const VERSION = "0.5.0";
+export const VERSION = "0.6.0";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -157,6 +162,52 @@ export const Agent = {
   /** JSON Schema export for LLM tool-use registration. */
   jsonSchema(): Record<string, unknown> {
     return Schema.jsonSchema();
+  },
+
+  /**
+   * The ops that turn document `a` into document `b`. Mirrors PHP `Agent::diff`,
+   * and gives the same ops in the same order for the same inputs.
+   *
+   * - `reduce(a, diff(a, b))` equals `b` (key order aside). The ops are verified
+   *   by replaying them; ops that do not reproduce `b` become one `doc.replace`.
+   * - Documents that write the same file diff to `[]`, so
+   *   `diff(d, read(toBytes(d)))` is `[]`: a save without a change records
+   *   nothing, even where the reader normalises (merged runs, a header row's
+   *   bold, a dropped empty paragraph).
+   * - Rewording one paragraph is one `blocks.replace` at its own path, even
+   *   inside a table cell, a quote or a list; moving one is one `blocks.move`.
+   *
+   * Store `diff(newer, older)` to keep a version as the ops that restore it.
+   * Both documents must be valid: the "same file" check writes them.
+   */
+  diff(a: Any, b: Any): DocOp[] {
+    return DocDiff.diff(a, b);
+  },
+
+  /**
+   * Apply one op, or a list of them, to a document; returns a new document and
+   * never modifies the input. An op whose path or index does not resolve is
+   * skipped.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  reduce(doc: Any, opOrOps: DocOp | readonly DocOp[]): Record<string, any> {
+    // PHP's `$opOrOps === [] || array_is_list($opOrOps)`: an array, or an
+    // object keyed exactly "0".."n-1", which is how PHP sees `{}` too.
+    return DocReducer.applyAll(doc, isList(opOrOps) ? valuesOf(opOrOps) : [opOrOps]);
+  },
+
+  /** JSON Schema for one document op. */
+  opSchema(): Record<string, unknown> {
+    return DocOpSchema.jsonSchema();
+  },
+
+  /**
+   * Whether two documents write the same file: runs the reader merges, a
+   * header row's bold and an empty paragraph the writer drops do not make them
+   * different.
+   */
+  equivalent(a: Any, b: Any): boolean {
+    return DocDiff.equivalent(a, b);
   },
 
   version(): string {

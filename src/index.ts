@@ -16,3 +16,9 @@ export { toMarkdown } from "./markdown/to-markdown";
 export { fromMarkdown, parseInline } from "./markdown/from-markdown";
 export { pngSize, jpegSize, sniffImageSize, parseDataUrl } from "./helpers/image-size";
 export { zipSync, unzipSync, type ZipFile } from "./zip";
+
+// Document versions as ops (Agent.diff / Agent.reduce / Agent.opSchema).
+export { DocDiff } from "./ops/doc-diff";
+export { DocReducer } from "./ops/doc-reducer";
+export { DocOpSchema } from "./ops/doc-op-schema";
+export type * from "./ops/types";
