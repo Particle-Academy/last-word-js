@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## 0.6.1 — 2026-09-15
+## 0.6.1 — 2026-09-14
 
 ### Fixed
 
@@ -31,7 +31,7 @@ runs against 0.6.3.
   held one of the paths above, which no `diff()` emits; and a history that fell
   back to `doc.replace` for a numeric key still replays correctly.
 
-## 0.6.0 — 2026-09-15
+## 0.6.0 — 2026-09-14
 
 ### Added
 
