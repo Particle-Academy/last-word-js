@@ -7,7 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-07
+
+### Added
+
+- **`{ template }` on `Agent.toBytes()` and `Agent.write()` — render onto a house
+  template** (last-word#3), matching PHP `last-word` 0.7.0. The template's
+  `word/styles.xml` and `word/theme/theme1.xml` are carried verbatim; definitions
+  the template lacks — `CodeBlock`, `InlineCode`, heading levels it omits — come
+  from the built-in set.
+
+  **Binds by style name, with nothing to configure**, because the document model
+  already uses Word's own style ids. Two Word behaviours shape it, and both fail
+  SILENTLY rather than loudly: a `w:pStyle` naming an undefined style renders
+  unstyled, so a template without `CodeBlock` would quietly produce unformatted
+  code; and a duplicate definition is legal with the LATER one winning, so
+  appending a style the template already has would override the house style for
+  exactly the subset the two happen to share. Hence: append only what is missing.
+
+  The theme travels with the styles deliberately — a style naming a theme colour
+  or font resolves against whatever theme is in the package, so styles without
+  their theme give the template's structure in the default's colours.
+
+  **Not taken from the template:** `w:sectPr` (page size, margins, headers,
+  footers), `word/numbering.xml` (this document's lists reference numbering ids
+  defined here) and `word/settings.xml`. A cover page is not in this release.
+
+  `toBytes()` takes the template as **bytes** — it is universal and a browser has
+  no filesystem — and says so rather than failing with a confusing zip error.
+  `write()` accepts bytes or a path.
+
+  **Nothing changes for callers who do not pass it.** The built-in look is
+  byte-for-byte what it was, which the determinism suite and the PHP parity suite
+  both check.
+
+- **`TemplateException`** (exported), thrown when a template is not a readable
+  package or has no `word/styles.xml`. It REFUSES rather than falling back,
+  because a document that silently comes out in the built-in style is the exact
+  failure the option exists to end — and it gives a host a way to validate a
+  customer-supplied template at upload rather than at render.
+
+- **`WriteOptions`** is exported as a type.
+
 ### Fixed
+
+- **The parity suite's `word/styles.xml` divergence entry named one cause and
+  there are three.** Found while reading both engines' style sets side by side for
+  the template work. It said only `w:eastAsia`; it now also records that
+  **`Heading1` is 40 half-points here and 36 in PHP** (user-visible — the same
+  document gets a different top heading size from each engine) and that **PHP
+  defines `Title` and `ListParagraph` where this port defines neither**.
+
+  Behaviour is unchanged: reconciling either changes rendered output for every
+  existing consumer, which is the pair owner's call. But a divergence ledger is the
+  one place anyone looks before trusting the pair, and an entry that understates is
+  the thing that file exists to prevent. It matters for templates specifically: a
+  house template's "Title" and "List Paragraph" styles bind in PHP and have
+  nothing to bind to here.
 
 - **`CHANGELOG.md` is now in the published tarball.** `files` did not whitelist it, so npm never shipped it — and this package puts breaking changes in MINOR releases and tells you in the README to read the entry before taking one. The instruction existed for the author, who has the file, and not for the consumer, who is the only one being instructed. Nothing for you to do; the file simply arrives from this release on.
 

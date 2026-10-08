@@ -5,6 +5,7 @@
  */
 
 import { Xml } from "../helpers/xml";
+import { DocxTemplate } from "./docx-template";
 import { parseDataUrl, sniffImageSize } from "../helpers/image-size";
 import type { Block, Doc, ListItem, Run } from "../schema/types";
 import { zipSync, type ZipFile } from "../zip";
@@ -24,6 +25,7 @@ const NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const NS_PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture";
 const REL_STYLES = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles";
 const REL_NUMBERING = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering";
+const REL_THEME = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
 const REL_HYPERLINK = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
 const REL_IMAGE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
 const REL_DOCUMENT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
@@ -298,11 +300,24 @@ export class DocxWriter {
   /** Twips between the page margins; set from `page` before any block renders. */
   private contentWidth = 9360;
 
+  /**
+   * @param template a house template whose styles + theme this document renders
+   *   onto (last-word#3). Undefined is the built-in look, byte-for-byte as before.
+   */
+  constructor(private readonly template?: DocxTemplate) {}
+
   toBytes(doc: Doc): Uint8Array {
     this.rels = [
       { id: "rId1", type: REL_STYLES, target: "styles.xml", external: false },
       { id: "rId2", type: REL_NUMBERING, target: "numbering.xml", external: false },
     ];
+    if (this.template?.hasTheme() === true) {
+      // The theme travels WITH the styles. A style naming a theme colour or font
+      // ("accent1", "majorHAnsi") resolves against whatever theme is in the
+      // package, so styles without their theme give the template's structure in
+      // the default's colours.
+      this.rels.push({ id: "rId3", type: REL_THEME, target: "theme/theme1.xml", external: false });
+    }
     this.hyperlinkIds = new Map();
     this.media = [];
     this.drawingId = 0;
@@ -331,8 +346,11 @@ export class DocxWriter {
       { name: "word/document.xml", data: encode(documentXml) },
       { name: "word/styles.xml", data: encode(this.stylesXml(doc)) },
       { name: "word/numbering.xml", data: encode(this.numberingXml()) },
-      { name: "word/_rels/document.xml.rels", data: encode(this.documentRelsXml()) },
     );
+    if (this.template?.hasTheme() === true) {
+      files.push({ name: "word/theme/theme1.xml", data: encode(this.template.theme()!) });
+    }
+    files.push({ name: "word/_rels/document.xml.rels", data: encode(this.documentRelsXml()) });
     for (const m of this.media) {
       files.push({ name: `word/media/${m.name}`, data: m.bytes });
     }
@@ -722,6 +740,11 @@ export class DocxWriter {
       `<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>` +
       `<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>` +
       `<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>`;
+    if (this.template?.hasTheme() === true) {
+      // A part present but undeclared makes the package invalid, and Word reports
+      // that as "unreadable content" without naming the part.
+      overrides += `<Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>`;
+    }
     if (doc.title !== undefined) {
       overrides += `<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>`;
     }
@@ -762,53 +785,109 @@ export class DocxWriter {
     return out + `</Relationships>`;
   }
 
+  /**
+   * `word/styles.xml`.
+   *
+   * With a template (last-word#3) the template's OWN part is emitted, and only
+   * the definitions this writer emits that the template does not declare are
+   * appended. Two Word behaviours shape this, and both fail SILENTLY:
+   *
+   *  - a `w:pStyle` naming an undefined style renders UNSTYLED rather than
+   *    erroring, so a template with no `CodeBlock` would quietly produce
+   *    unformatted code;
+   *  - a duplicate definition is legal and the LATER one wins, so appending a
+   *    style the template already has would override the house style for exactly
+   *    the subset we happen to share.
+   */
   private stylesXml(doc: Doc): string {
-    const headingSizes = [40, 32, 28, 26, 24, 22];
+    const definitions = this.styleDefinitions(doc);
+
+    if (this.template !== undefined) {
+      let missing = "";
+      for (const [styleId, xml] of Object.entries(definitions)) {
+        if (!this.template.defines(styleId)) missing += xml;
+      }
+      return this.template.stylesWith(missing);
+    }
+
+    return (
+      Xml.declaration() +
+      `<w:styles xmlns:w="${NS_W}">` +
+      this.docDefaults(doc) +
+      Object.values(definitions).join("") +
+      `</w:styles>`
+    );
+  }
+
+  private docDefaults(doc: Doc): string {
     const font = typeof (doc as Any).defaultFont === "string" && (doc as Any).defaultFont !== ""
       ? Xml.attr((doc as Any).defaultFont)
       : "Calibri";
     const size = halfPoints((doc as Any).defaultSize) ?? 22;
-    let styles =
+
+    return (
       `<w:docDefaults><w:rPrDefault><w:rPr>` +
       `<w:rFonts w:ascii="${font}" w:hAnsi="${font}" w:eastAsia="${font}" w:cs="${font}"/>` +
       `<w:sz w:val="${size}"/><w:szCs w:val="${size}"/>` +
       `</w:rPr></w:rPrDefault>` +
       `<w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="259" w:lineRule="auto"/></w:pPr></w:pPrDefault>` +
-      `</w:docDefaults>` +
+      `</w:docDefaults>`
+    );
+  }
+
+  /**
+   * Every style this writer can emit, keyed by `w:styleId`.
+   *
+   * Insertion order is the emission order and is unchanged from when this was
+   * one concatenation, so the no-template output is byte-identical — which the
+   * determinism suite and the PHP parity suite both check.
+   */
+  private styleDefinitions(doc: Doc): Record<string, string> {
+    const headingSizes = [40, 32, 28, 26, 24, 22];
+    const styles: Record<string, string> = {};
+
+    styles["Normal"] =
       `<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>`;
 
     for (let level = 1; level <= 6; level++) {
       const sz = headingSizes[level - 1]!;
-      styles +=
+      styles[`Heading${level}`] =
         `<w:style w:type="paragraph" w:styleId="Heading${level}"><w:name w:val="heading ${level}"/>` +
         `<w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>` +
         `<w:pPr><w:keepNext/><w:spacing w:before="240" w:after="120"/><w:outlineLvl w:val="${level - 1}"/></w:pPr>` +
         `<w:rPr><w:b/><w:sz w:val="${sz}"/><w:szCs w:val="${sz}"/></w:rPr></w:style>`;
     }
 
-    styles +=
+    styles["Quote"] =
       `<w:style w:type="paragraph" w:styleId="Quote"><w:name w:val="Quote"/>` +
       `<w:basedOn w:val="Normal"/><w:qFormat/>` +
       `<w:pPr><w:ind w:left="720"/></w:pPr>` +
-      `<w:rPr><w:i/><w:color w:val="595959"/></w:rPr></w:style>` +
+      `<w:rPr><w:i/><w:color w:val="595959"/></w:rPr></w:style>`;
+
+    styles["CodeBlock"] =
       `<w:style w:type="paragraph" w:styleId="CodeBlock"><w:name w:val="Code Block"/>` +
       `<w:basedOn w:val="Normal"/>` +
       `<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/>` +
       `<w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/></w:pPr>` +
       `<w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:cs="Consolas"/>` +
-      `<w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:style>` +
+      `<w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:style>`;
+
+    styles["InlineCode"] =
       `<w:style w:type="character" w:styleId="InlineCode"><w:name w:val="Inline Code"/>` +
       `<w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:cs="Consolas"/>` +
-      `<w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/></w:rPr></w:style>` +
+      `<w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/></w:rPr></w:style>`;
+
+    styles["Hyperlink"] =
       `<w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/>` +
       `<w:rPr><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr></w:style>`;
+
     // The `LastWordTable` style used to live here, carrying the borders, the
     // cell margins and the first-row bold that PHP and Python wrote inline.
     // A named style cannot vary per table instance, so per-table borders
     // forced everything inline and the style has nothing left to say. Its
     // 60/108 cell margins became the shared default rather than being dropped.
 
-    return Xml.declaration() + `<w:styles xmlns:w="${NS_W}">${styles}</w:styles>`;
+    return styles;
   }
 
   private numberingXml(): string {

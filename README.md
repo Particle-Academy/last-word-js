@@ -66,6 +66,7 @@ code?, link?, color?, highlight? }` (colors are `#RRGGBB`).
 - `validateAndRepair(doc)` → `{ok, schema, errors}` (coerces strings to runs,
   clamps heading levels, drops unknown block types with the error retained)
 - `toBytes(doc)` → `Uint8Array` (universal, deterministic output)
+- `toBytes(doc, { template })` → render onto a house template's styles + theme
 - `write(doc, path)` → `{path, bytes, blocks}` (Node only)
 - `read(bytes)` / `fromBytes(bytes)` → `Doc` (universal; reads `.docx`,
   legacy `.doc`, `.odt` and `.rtf`, decided from the bytes; tolerates
@@ -87,6 +88,51 @@ dropped on `toMarkdown`; everything else round-trips.
 Images are embedded from data URLs (PNG/JPEG); when `widthPx`/`heightPx` are
 omitted the intrinsic size is sniffed from the bytes (PNG IHDR / JPEG SOF)
 and capped at 6.5in width keeping aspect.
+
+## Rendering onto a house template
+
+Every document used to come out in the built-in look, so an automation that
+produced a structurally correct `.docx` still needed a human to re-apply the
+house style. Pass a `.dotx` (or `.docx`) and it renders onto that template's
+typography instead:
+
+```ts
+Agent.toBytes(doc, { template: dotxBytes });           // universal — bytes
+await Agent.write(doc, path, { template: "/t/house.dotx" }); // Node — bytes or a path
+```
+
+It **binds by style name**, with nothing to configure. The document model already
+uses Word's own style ids, so a template that defines `Normal`, `Heading1..n`,
+`Quote` and `Hyperlink` binds on its own. The template's `word/styles.xml` and
+`word/theme/theme1.xml` are carried through verbatim; definitions it does not have
+(`CodeBlock`, `InlineCode`, heading levels it omits) are supplied from the
+built-in set.
+
+The theme travels **with** the styles deliberately. A style that names a theme
+colour or font resolves against whatever theme is in the package, so taking styles
+alone would give you the template's structure in the default's colours — a wrong
+answer that looks deliberate.
+
+**What the template does NOT bring, yet:** `w:sectPr` (page size, margins,
+headers, footers), `word/numbering.xml` (your lists reference numbering ids this
+package defines) and `word/settings.xml`. So list markers and page setup are still
+ours; the typography, colours and theme are the template's. A cover page is a
+`sectPr`-and-headers job and is not here.
+
+**An unusable template throws `TemplateException` rather than falling back.** A
+document that silently comes out in the wrong style is the failure this option
+exists to end — and it gives a host a way to validate a customer-supplied template
+at upload time rather than at render time.
+
+> **One difference from the PHP engine.** This port does not emit a
+> `ListParagraph` paragraph style on lists and defines no `Title` or
+> `ListParagraph` style, where PHP does both. So a template's *List Paragraph* and
+> *Title* styles bind under PHP and have nothing to bind to here. It is recorded in
+> the parity suite's divergence list; reconciling it changes rendered output for
+> existing consumers either way.
+
+Output stays deterministic: the same document and the same template always produce
+the same bytes.
 
 ## Document versions as ops
 

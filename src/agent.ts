@@ -5,6 +5,8 @@
  */
 
 import { SchemaException, UnsupportedFormatException } from "./exceptions";
+import { DocxTemplate } from "./writer/docx-template";
+import { TemplateException } from "./exceptions";
 import { fromMarkdown } from "./markdown/from-markdown";
 import { toMarkdown } from "./markdown/to-markdown";
 import { DocDiff } from "./ops/doc-diff";
@@ -24,7 +26,7 @@ import { Validator } from "./schema/validator";
 import { DocxWriter } from "./writer/docx-writer";
 
 /** This package's own version, pinned to package.json by `version.test.ts`. */
-export const VERSION = "0.6.1";
+export const VERSION = "0.7.0";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -41,6 +43,40 @@ function assertValid(doc: Any): void {
       errors,
     );
   }
+}
+
+/**
+ * Write options. `template` is a `.dotx`/`.docx`: bytes anywhere, or a filesystem
+ * path through `Agent.write()` (Node only — `toBytes()` is universal and a
+ * browser has no filesystem).
+ */
+export type WriteOptions = {
+  template?: Uint8Array | string;
+};
+
+/**
+ * The `template` option as an opened template, or undefined when absent.
+ *
+ * An empty value counts as absent, so a host passing through a blank form field
+ * gets the built-in look rather than an exception.
+ */
+function templateFrom(options?: WriteOptions): DocxTemplate | undefined {
+  const template = options?.template;
+
+  if (template === undefined || template === null) return undefined;
+
+  if (typeof template === "string") {
+    // Only `write()` resolves a path; reaching here with one means `toBytes()`
+    // was given a path it cannot read.
+    throw new TemplateException(
+      "toBytes() needs the template as bytes — it is universal and cannot read a path. " +
+        "Read the file yourself, or use write(), which accepts either.",
+    );
+  }
+
+  if (template.length === 0) return undefined;
+
+  return DocxTemplate.open(template);
 }
 
 export const Agent = {
@@ -72,17 +108,52 @@ export const Agent = {
     };
   },
 
-  /** DOCX bytes for a doc (no temp file). Universal. Throws SchemaException if invalid. */
-  toBytes(doc: Any): Uint8Array {
+  /**
+   * DOCX bytes for a doc (no temp file). Universal. Throws SchemaException if invalid.
+   *
+   * `options.template` is a `.dotx`/`.docx` whose `word/styles.xml` and
+   * `word/theme/theme1.xml` the document renders onto, so it comes out in a house
+   * look rather than the built-in one (last-word#3).
+   *
+   * Binds BY STYLE NAME, with nothing to configure: the document model already
+   * uses Word's own style ids, so a template defining `Normal`, `Heading1..n`,
+   * `Quote` and `Hyperlink` binds on its own. Definitions the template lacks are
+   * supplied from the built-in set, because a `w:pStyle` naming an undefined
+   * style renders UNSTYLED in Word rather than erroring.
+   *
+   * NOT taken from the template: `w:sectPr` (page size, margins, headers,
+   * footers), `word/numbering.xml` (this document's lists reference numbering ids
+   * defined here) and `word/settings.xml`. So list markers and page setup stay
+   * ours; the typography, colours and theme are the template's.
+   *
+   * An unusable template throws `TemplateException` rather than falling back — a
+   * document that silently comes out in the wrong style is the failure this
+   * option exists to end, and it lets a host validate a customer-supplied
+   * template at upload rather than at render.
+   *
+   * Bytes rather than a path, because this entry point is universal and a browser
+   * has no filesystem. `write()` accepts either.
+   */
+  toBytes(doc: Any, options?: WriteOptions): Uint8Array {
     assertValid(doc);
-    return new DocxWriter().toBytes(doc);
+    return new DocxWriter(templateFrom(options)).toBytes(doc);
   },
 
-  /** Write a doc to disk as a .docx file (Node only). Throws SchemaException if invalid. */
-  async write(doc: Any, path: string): Promise<WriteResult> {
+  /**
+   * Write a doc to disk as a .docx file (Node only). Throws SchemaException if
+   * invalid. Same options as {@link toBytes}, except `template` may also be a
+   * filesystem path.
+   */
+  async write(doc: Any, path: string, options?: WriteOptions): Promise<WriteResult> {
     assertValid(doc);
-    const bytes = new DocxWriter().toBytes(doc);
     const fs = await import("node:fs");
+
+    let resolved = options;
+    if (typeof options?.template === "string") {
+      resolved = { ...options, template: fs.readFileSync(options.template) };
+    }
+
+    const bytes = new DocxWriter(templateFrom(resolved)).toBytes(doc);
     fs.writeFileSync(path, bytes);
     return { path, bytes: bytes.length, blocks: doc?.blocks?.length ?? 0 };
   },

@@ -201,11 +201,36 @@ const KNOWN_DIVERGENT_PARTS: Record<string, string> = {
     "tolerates an unused Default — so this is a question of which is tidier, not " +
     "which works.",
 
+  /**
+   * THREE causes, not one. This entry named only the first until 2026-10-07, when
+   * adding template binding (last-word#3) required reading both engines' style
+   * sets side by side. **A ledger entry that understates is the thing this file
+   * exists to prevent**, so the other two are written down:
+   *
+   *   1. w:eastAsia      the port emits it alongside w:ascii/w:hAnsi/w:cs in the
+   *                      default run properties; PHP omits it.
+   *   2. Heading1 SIZE   the port writes 40 half-points (20pt), PHP 36 (18pt).
+   *                      Levels 2-6 agree. **User-visible**: the same document
+   *                      gets a different top heading size from each engine.
+   *   3. MISSING STYLES  PHP defines `Title` and `ListParagraph`; the port defines
+   *                      neither. `ListParagraph` pairs with the document.xml
+   *                      difference above (PHP emits the pStyle, the port does
+   *                      not), so the port is self-consistent -- but a HOUSE
+   *                      TEMPLATE's "Title" and "List Paragraph" styles therefore
+   *                      bind in PHP and have nothing to bind to here.
+   *
+   * (1) is arguably better in the port: without an eastAsia font Word picks its
+   * own for CJK runs, which is exactly the text the `unicode` case exercises.
+   * (2) and (3) are drift rather than a decision either way.
+   *
+   * Recorded rather than fixed, for the same reason as the table difference:
+   * changing either engine's style set changes rendered output for every existing
+   * consumer, and that is the pair owner's call.
+   */
   "word/styles.xml":
-    'The port emits w:eastAsia="Calibri" alongside w:ascii/w:hAnsi/w:cs in the ' +
-    "default run properties; PHP omits it. The port is arguably more correct: " +
-    "without an eastAsia font Word picks its own for CJK runs, which is exactly " +
-    "the text the `unicode` case above exercises.",
+    'Three causes: the port emits w:eastAsia="Calibri" where PHP omits it; ' +
+    "Heading1 is 40 half-points here and 36 in PHP (user-visible); and PHP " +
+    "defines Title + ListParagraph, which the port does not. See the comment above.",
 
   "word/numbering.xml":
     '<w:multiLevelType w:val="hybridMultilevel"/> is present in the port and absent ' +
