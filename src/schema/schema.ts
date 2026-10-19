@@ -55,6 +55,24 @@ export const Schema = {
       description: "Box spacing in points. Anything omitted is left alone.",
       properties: fill(["top", "right", "bottom", "left"], points),
     };
+    const bandSlot = {
+      type: "string",
+      description:
+        'Text. `{page}` is the current page number and `{pages}` the page count, both live fields: "Page {page} of {pages}".',
+    };
+    const band = {
+      type: "object",
+      additionalProperties: false,
+      description:
+        'A running header or footer: one line with a left, a centre and a right slot, e.g. {"left": "Q3 Board Memo | Confidential", "right": "Page {page} of {pages}"}. 9pt grey unless size/color say otherwise.',
+      properties: {
+        left: bandSlot,
+        center: bandSlot,
+        right: bandSlot,
+        size: { type: "number", exclusiveMinimum: 0, description: "Points; 9 by default." },
+        color: { type: "string", pattern: "^#[0-9A-Fa-f]{6}$", description: "Text colour; #6B7280 by default." },
+      },
+    };
 
     /** Properties every paragraph-shaped block accepts — paragraph, heading, list item. */
     const paragraphProps = {
@@ -112,6 +130,11 @@ export const Schema = {
             size: { type: "string", enum: [...this.PAGE_SIZES] },
             orientation: { type: "string", enum: ["portrait", "landscape"] },
             margins: { $ref: "#/definitions/boxSides" },
+            header: { $ref: "#/definitions/band", description: "A running header on every page." },
+            footer: {
+              $ref: "#/definitions/band",
+              description: "A running footer on every page -- where a multi-page document carries its page numbers.",
+            },
           },
         },
         defaultFont: { type: "string", description: "Font every run inherits unless it names its own." },
@@ -127,6 +150,7 @@ export const Schema = {
         boxBorders,
         tableBorders,
         boxSides,
+        band,
         listItem: {
           type: "object",
           required: ["runs"],

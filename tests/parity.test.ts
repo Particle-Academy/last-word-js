@@ -150,6 +150,18 @@ const DOCS: Record<string, unknown> = {
       { type: "paragraph", runs: [{ text: "0" }] },
     ],
   },
+
+  /** Running header + footer with live page fields, on narrowed margins (tab stops follow them). */
+  bands: {
+    title: "Bands",
+    metadata: META,
+    page: {
+      margins: { left: 54, right: 54 },
+      header: { right: "Board of Directors", color: "#1F3A5F" },
+      footer: { left: "Q3 Board Memo | Confidential", center: "Draft", right: "Page {page} of {pages}", size: 8 },
+    },
+    blocks: [{ type: "paragraph", runs: [{ text: "Body" }, { text: "link", link: "https://example.com" }] }],
+  },
 };
 
 /**

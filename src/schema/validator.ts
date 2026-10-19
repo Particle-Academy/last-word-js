@@ -119,6 +119,25 @@ export class Validator {
           ...checkEnum(doc.page.orientation, "/page/orientation", "Page `orientation`", ["portrait", "landscape"]),
         );
         errors.push(...checkBoxSides(doc.page.margins, "/page/margins", "Page `margins`"));
+        for (const kind of ["header", "footer"] as const) {
+          const band = doc.page[kind];
+          if (band === undefined || band === null) continue;
+          if (!isPlainObject(band)) {
+            errors.push(err(`/page/${kind}`, `Page \`${kind}\` must be an object (\`{ left?, center?, right?, size?, color? }\`).`));
+            continue;
+          }
+          for (const slot of ["left", "center", "right"]) {
+            if (band[slot] !== undefined && typeof band[slot] !== "string") {
+              errors.push(err(`/page/${kind}/${slot}`, `Page \`${kind}.${slot}\` must be text.`));
+            }
+          }
+          if (band.size !== undefined && !(typeof band.size === "number" && band.size > 0)) {
+            errors.push(err(`/page/${kind}/size`, `Page \`${kind}.size\` must be a positive number of points.`));
+          }
+          if (band.color !== undefined && !(typeof band.color === "string" && /^#[0-9A-Fa-f]{6}$/.test(band.color))) {
+            errors.push(err(`/page/${kind}/color`, `Page \`${kind}.color\` must be #RRGGBB.`));
+          }
+        }
       }
     }
 

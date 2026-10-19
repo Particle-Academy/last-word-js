@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-19
+
+### Added
+
+- **Running headers and footers with live page numbers**: `page.header` and
+  `page.footer`, each one line with `left`, `center` and `right` slots (plus
+  optional `size` and `color`); `{page}` and `{pages}` become live PAGE and
+  NUMPAGES fields. The reader reads them back. **Nothing to do**: a document
+  without them is byte-identical. Same as `particle-academy/last-word` 0.8.0 and
+  `fancy-last-word` 0.4.0; parity holds (new `bands` parity fixture).
+
+### Fixed
+
+- `package-lock.json` carried `0.6.1` through the 0.7.0 release; it now matches.
+
 ## [0.7.0] - 2026-10-07
 
 ### Added

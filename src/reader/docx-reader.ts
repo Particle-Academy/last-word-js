@@ -121,7 +121,94 @@ export class DocxReader {
     }
     if (Object.keys(margins).length > 0) out.margins = margins;
 
+    for (const kind of ["header", "footer"] as const) {
+      const band = this.readBand(sectPr, kind);
+      if (band !== null) out[kind] = band;
+    }
+
     return Object.keys(out).length > 0 ? out : null;
+  }
+
+  /**
+   * The section's DEFAULT header or footer as a band. Mirrors PHP
+   * DocxReader::parseBand(): tab-separated segments become left/center/right,
+   * PAGE / NUMPAGES fields (simple or complex) become `{page}` / `{pages}`.
+   */
+  private readBand(sectPr: XmlNode, kind: "header" | "footer"): Record<string, unknown> | null {
+    let partName: string | null = null;
+    for (const node of sectPr.children) {
+      if (node.name === `${kind}Reference` && (at(node, "type") === "default" || at(node, "type") === undefined)) {
+        const target = this.rels[at(node, "id") ?? ""]?.target;
+        partName = typeof target === "string" ? "word/" + target.replace(/\\/g, "/").replace(/^\/+/, "") : null;
+      }
+    }
+    if (partName === null) return null;
+    const xml = this.partText(partName);
+    const root = xml ? parseXml(xml) : null;
+    const p = el(root, "p");
+    if (!p) return null;
+
+    const segments: string[] = [""];
+    let firstRun: XmlNode | null = null;
+    let field: string | false | null = null; // inside a complex field: its instruction so far
+    const append = (s: string): void => {
+      segments[segments.length - 1] += s;
+    };
+    const walk = (node: XmlNode): void => {
+      for (const child of node.children) {
+        const name = child.name;
+        if (name === "fldSimple") {
+          append(fieldToken(at(child, "instr") ?? ""));
+        } else if (name === "r") {
+          firstRun ??= child;
+          walk(child);
+        } else if (name === "fldChar") {
+          const type = at(child, "fldCharType");
+          if (type === "begin") {
+            field = "";
+          } else if (type === "separate" && field !== null) {
+            if (typeof field === "string") append(fieldToken(field));
+            field = false;
+          } else if (type === "end") {
+            field = null;
+          }
+        } else if (name === "instrText" && typeof field === "string") {
+          field += child.text;
+        } else if (field === null && name === "t") {
+          append(child.text);
+        } else if (field === null && name === "tab") {
+          segments.push("");
+        } else if (name === "hyperlink" || name === "smartTag") {
+          walk(child);
+        }
+      }
+    };
+    walk(p);
+
+    let slots: Record<string, string>;
+    if (segments.length === 1) {
+      const jc = at(el(el(p, "pPr"), "jc"), "val") ?? "";
+      const slot = jc === "center" ? "center" : jc === "right" || jc === "end" ? "right" : "left";
+      slots = { [slot]: segments[0] ?? "" };
+    } else if (segments.length === 2) {
+      slots = { left: segments[0] ?? "", right: segments[1] ?? "" };
+    } else {
+      slots = { left: segments[0] ?? "", center: segments[1] ?? "", right: segments.slice(2).join(" ") };
+    }
+
+    const band: Record<string, unknown> = {};
+    for (const slot of ["left", "center", "right"]) {
+      if ((slots[slot] ?? "") !== "") band[slot] = slots[slot];
+    }
+    if (Object.keys(band).length === 0) return null;
+
+    const rPr = el(firstRun ?? undefined, "rPr");
+    const sz = Number(at(el(rPr, "sz"), "val"));
+    if (Number.isInteger(sz) && at(el(rPr, "sz"), "val") !== undefined && sz !== 18) band.size = sz / 2;
+    const color = (at(el(rPr, "color"), "val") ?? "").toUpperCase();
+    if (/^[0-9A-F]{6}$/.test(color) && color !== "6B7280") band.color = "#" + color;
+
+    return band;
   }
 
   private readDocDefaults(): { font: string | null; size: number | null } {
@@ -707,6 +794,12 @@ function isEmptyParagraph(block: Block | undefined): boolean {
 }
 
 /** A numeric attribute, or null when absent or unparseable. */
+/** A field instruction as a band token: PAGE → {page}, NUMPAGES → {pages}, else ''. Mirrors PHP. */
+function fieldToken(instr: string): string {
+  const word = (instr.trim().split(/[ \\]/)[0] ?? "").toUpperCase();
+  return word === "PAGE" ? "{page}" : word === "NUMPAGES" || word === "SECTIONPAGES" ? "{pages}" : "";
+}
+
 function numAttr(node: XmlNode | undefined, name: string): number | null {
   const raw = at(node, name);
   if (raw === undefined) return null;

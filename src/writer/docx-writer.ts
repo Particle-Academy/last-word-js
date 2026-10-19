@@ -9,6 +9,7 @@ import { DocxTemplate } from "./docx-template";
 import { parseDataUrl, sniffImageSize } from "../helpers/image-size";
 import type { Block, Doc, ListItem, Run } from "../schema/types";
 import { zipSync, type ZipFile } from "../zip";
+import { isPlainObject } from "../util";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -30,6 +31,8 @@ const REL_HYPERLINK = "http://schemas.openxmlformats.org/officeDocument/2006/rel
 const REL_IMAGE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
 const REL_DOCUMENT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
 const REL_CORE = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties";
+/** header / footer relationship types are `${REL_BASE}/header` and `${REL_BASE}/footer`. */
+const REL_BASE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
 const NUM_ID_BULLET = 1;
 const NUM_ID_DECIMAL = 2;
@@ -114,6 +117,48 @@ function halfPoints(pt: unknown): number | null {
 /** #RRGGBB → RRGGBB, upper-cased. Anything else is null. */
 function hex(value: unknown): string | null {
   return typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value) ? normalizeHex(value) : null;
+}
+
+/** A running header / footer, normalised. */
+interface Band {
+  left: string;
+  center: string;
+  right: string;
+  size: number;
+  color: string;
+}
+
+/** A band spec, normalised; null when it asks for nothing. Mirrors PHP DocxWriter::band(). */
+function band(spec: unknown): Band | null {
+  if (!isPlainObject(spec) && !Array.isArray(spec)) return null;
+  const s = spec as Any;
+  const slot = (k: string): string => (typeof s[k] === "string" ? s[k] : "");
+  const left = slot("left");
+  const center = slot("center");
+  const right = slot("right");
+  if (left === "" && center === "" && right === "") return null;
+  const size = isNum(s.size) && s.size > 0 ? s.size : 9;
+  return { left, center, right, size, color: hex(s.color) ?? "6B7280" };
+}
+
+/**
+ * Text with `{page}` / `{pages}` as live PAGE / NUMPAGES fields, written as
+ * COMPLEX fields so every piece carries the band's formatting (see PHP).
+ */
+function bandRuns(text: string, rPr: string): string {
+  let out = "";
+  for (const piece of text.split(/(\{page\}|\{pages\})/).filter((p) => p !== "")) {
+    const instr = piece === "{page}" ? "PAGE" : piece === "{pages}" ? "NUMPAGES" : null;
+    out +=
+      instr === null
+        ? `<w:r>${rPr}<w:t xml:space="preserve">${Xml.text(piece)}</w:t></w:r>`
+        : `<w:r>${rPr}<w:fldChar w:fldCharType="begin"/></w:r>` +
+          `<w:r>${rPr}<w:instrText xml:space="preserve"> ${instr} </w:instrText></w:r>` +
+          `<w:r>${rPr}<w:fldChar w:fldCharType="separate"/></w:r>` +
+          `<w:r>${rPr}<w:t>1</w:t></w:r>` +
+          `<w:r>${rPr}<w:fldChar w:fldCharType="end"/></w:r>`;
+  }
+  return out;
 }
 
 /** `<w:shd>` — the one spelling used for runs, paragraphs and cells alike. */
@@ -300,6 +345,42 @@ export class DocxWriter {
   /** Twips between the page margins; set from `page` before any block renders. */
   private contentWidth = 9360;
 
+  /** The running header / footer parts this document asked for, in write order. */
+  private bands: { kind: "header" | "footer"; xml: string }[] = [];
+
+  /**
+   * The next NUMBERED relationship id. Counted over the numbered rels only: the
+   * band rels (rIdHeader1 / rIdFooter1) are named, and counting them shifted
+   * every hyperlink and image id two places away from the PHP engine's.
+   */
+  private nextRelId(): string {
+    return `rId${this.rels.filter((r) => /^rId\d+$/.test(r.id)).length + 1}`;
+  }
+
+  /**
+   * One paragraph: left, TAB, centre, TAB, right, against a centre tab stop at
+   * half the content width and a right one at its edge.
+   */
+  private bandXml(kind: "header" | "footer", spec: Band): string {
+    const rPr = `<w:rPr><w:color w:val="${spec.color}"/><w:sz w:val="${halfPoints(spec.size)}"/></w:rPr>`;
+    const tag = kind === "header" ? "w:hdr" : "w:ftr";
+    return (
+      Xml.declaration() +
+      `<${tag} xmlns:w="${NS_W}" xmlns:r="${NS_R}">` +
+      `<w:p><w:pPr><w:tabs>` +
+      `<w:tab w:val="center" w:pos="${Math.trunc(this.contentWidth / 2)}"/>` +
+      `<w:tab w:val="right" w:pos="${this.contentWidth}"/>` +
+      `</w:tabs><w:spacing w:before="0" w:after="0"/></w:pPr>` +
+      bandRuns(spec.left, rPr) +
+      `<w:r>${rPr}<w:tab/></w:r>` +
+      bandRuns(spec.center, rPr) +
+      `<w:r>${rPr}<w:tab/></w:r>` +
+      bandRuns(spec.right, rPr) +
+      `</w:p>` +
+      `</${tag}>`
+    );
+  }
+
   /**
    * @param template a house template whose styles + theme this document renders
    *   onto (last-word#3). Undefined is the built-in look, byte-for-byte as before.
@@ -329,6 +410,19 @@ export class DocxWriter {
     const page = pageGeometry((doc as Any).page);
     this.contentWidth = page.w - page.left - page.right;
 
+    // Running header / footer: built before any block, so their rels sit after
+    // styles/numbering/theme and before every hyperlink and image -- the order
+    // the PHP engine writes them in.
+    this.bands = [];
+    const pageSpec = isPlainObject((doc as Any).page) ? (doc as Any).page : {};
+    for (const kind of ["header", "footer"] as const) {
+      const spec = band(pageSpec[kind]);
+      if (spec !== null) {
+        this.bands.push({ kind, xml: this.bandXml(kind, spec) });
+        this.rels.push({ id: `rId${kind === "header" ? "Header" : "Footer"}1`, type: `${REL_BASE}/${kind}`, target: `${kind}1.xml`, external: false });
+      }
+    }
+
     const body = this.renderBlocks(doc.blocks ?? [], {});
     const documentXml =
       Xml.declaration() +
@@ -349,6 +443,9 @@ export class DocxWriter {
     );
     if (this.template?.hasTheme() === true) {
       files.push({ name: "word/theme/theme1.xml", data: encode(this.template.theme()!) });
+    }
+    for (const b of this.bands) {
+      files.push({ name: `word/${b.kind}1.xml`, data: encode(b.xml) });
     }
     files.push({ name: "word/_rels/document.xml.rels", data: encode(this.documentRelsXml()) });
     for (const m of this.media) {
@@ -529,7 +626,7 @@ export class DocxWriter {
   private hyperlinkRel(url: string): string {
     const existing = this.hyperlinkIds.get(url);
     if (existing) return existing;
-    const id = `rId${this.rels.length + 1}`;
+    const id = this.nextRelId();
     this.rels.push({ id, type: REL_HYPERLINK, target: url, external: true });
     this.hyperlinkIds.set(url, id);
     return id;
@@ -688,7 +785,7 @@ export class DocxWriter {
     const ext = extForMime(decoded.mime);
     const name = `image${this.media.length + 1}.${ext}`;
     this.media.push({ name, bytes: decoded.bytes, ext });
-    const rid = `rId${this.rels.length + 1}`;
+    const rid = this.nextRelId();
     this.rels.push({ id: rid, type: REL_IMAGE, target: `media/${name}`, external: false });
 
     const { width, height } = resolveImageSize(block, decoded.bytes);
@@ -720,8 +817,12 @@ export class DocxWriter {
 
   private sectPr(page: PageGeometry): string {
     const orient = page.orientation === "landscape" ? ` w:orient="landscape"` : "";
+    // References FIRST: the schema orders them before w:pgSz.
+    const refs = this.bands
+      .map((b) => `<w:${b.kind}Reference w:type="default" r:id="rId${b.kind === "header" ? "Header" : "Footer"}1"/>`)
+      .join("");
     return (
-      `<w:sectPr><w:pgSz w:w="${page.w}" w:h="${page.h}"${orient}/>` +
+      `<w:sectPr>${refs}<w:pgSz w:w="${page.w}" w:h="${page.h}"${orient}/>` +
       `<w:pgMar w:top="${page.top}" w:right="${page.right}" w:bottom="${page.bottom}" w:left="${page.left}"` +
       ` w:header="720" w:footer="720" w:gutter="0"/>` +
       `</w:sectPr>`
@@ -744,6 +845,9 @@ export class DocxWriter {
       // A part present but undeclared makes the package invalid, and Word reports
       // that as "unreadable content" without naming the part.
       overrides += `<Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>`;
+    }
+    for (const b of this.bands) {
+      overrides += `<Override PartName="/word/${b.kind}1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${b.kind}+xml"/>`;
     }
     if (doc.title !== undefined) {
       overrides += `<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>`;
