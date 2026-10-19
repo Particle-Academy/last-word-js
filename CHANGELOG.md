@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-19
+
+### Added
+
+- **An agent guide ships with the package: `agent-guide/professional-documents.md`, and
+  `Agent.guide()` returns it.** What makes a document professional and the schema
+  idioms that produce it, distilled from rubric-judged agent builds in the
+  Fancy document lab: every rule in it moved a measured score. Give it to a
+  model together with the JSON schema; it works with any agent loop. The same
+  bytes ship in the PHP, Node and Python packages (a test in each pins the
+  hash). **Nothing to do**; nothing else changed.
+
 ## [0.8.0] - 2026-10-19
 
 ### Added

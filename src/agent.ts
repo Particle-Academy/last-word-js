@@ -4,6 +4,7 @@
  * and Node-only (browsers have no sync FS).
  */
 
+import agentGuide from "./agent-guide.json";
 import { SchemaException, UnsupportedFormatException } from "./exceptions";
 import { DocxTemplate } from "./writer/docx-template";
 import { TemplateException } from "./exceptions";
@@ -26,7 +27,7 @@ import { Validator } from "./schema/validator";
 import { DocxWriter } from "./writer/docx-writer";
 
 /** This package's own version, pinned to package.json by `version.test.ts`. */
-export const VERSION = "0.8.0";
+export const VERSION = "0.9.0";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -279,6 +280,15 @@ export const Agent = {
    */
   equivalent(a: Any, b: Any): boolean {
     return DocDiff.equivalent(a, b);
+  },
+
+  /**
+   * The agent guide: what makes this kind of file professional, and the schema
+   * idioms that produce it. Give it to a model with the schema; it works with any
+   * agent loop. Byte-identical to the PHP package's agent-guide/professional-documents.md.
+   */
+  guide(): string {
+    return (agentGuide as { guide: string }).guide;
   },
 
   version(): string {
