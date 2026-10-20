@@ -15,6 +15,17 @@ export { Format, detectFormat } from "./reader/format";
 export { toMarkdown } from "./markdown/to-markdown";
 export { fromMarkdown, parseInline } from "./markdown/from-markdown";
 export { pngSize, jpegSize, sniffImageSize, parseDataUrl } from "./helpers/image-size";
+export {
+  SUPPORTED_CHART_TYPES,
+  DEFAULT_PALETTE,
+  DEFAULT_ASPECT,
+  chartSpec,
+  chartNum,
+  chartLabel,
+  chartParseNum,
+  type ChartSpec,
+  type ChartSeriesSpec,
+} from "./helpers/chart";
 export { zipSync, unzipSync, type ZipFile } from "./zip";
 
 // Document versions as ops (Agent.diff / Agent.reduce / Agent.opSchema).

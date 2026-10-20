@@ -12,6 +12,7 @@ export type BlockType =
   | "code"
   | "quote"
   | "image"
+  | "chart"
   | "pageBreak"
   | "hr";
 
@@ -182,6 +183,57 @@ export interface ImageBlock {
   alt?: string;
 }
 
+/** One ECharts series, as a document chart reads it. */
+export interface ChartSeries {
+  /** bar (columns over a category xAxis, horizontal bars over a category yAxis), line or pie; bar when absent. */
+  type?: "bar" | "line" | "pie";
+  name?: string;
+  /** Numbers, or `{value, itemStyle?}`; a pie's points are `{name, value, itemStyle?}`. */
+  data: Array<number | { value: number; name?: string; itemStyle?: { color?: string } }>;
+  itemStyle?: { color?: string };
+  label?: { show?: boolean };
+  smooth?: boolean;
+  stack?: string;
+  [key: string]: unknown;
+}
+
+export interface ChartAxis {
+  type?: "category" | "value";
+  data?: Array<string | number>;
+  /** The axis title. */
+  name?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * The ECharts option a chart is drawn from -- the same field dark-slide's chart
+ * element takes. Open to any other ECharts key; the writer reads the ones typed.
+ */
+export interface ChartOption {
+  series: ChartSeries[] | ChartSeries;
+  xAxis?: ChartAxis | ChartAxis[];
+  yAxis?: ChartAxis | ChartAxis[];
+  title?: { text?: string } | string;
+  legend?: { show?: boolean };
+  color?: string[];
+  [key: string]: unknown;
+}
+
+/** A native Word chart, with its numbers in an embedded workbook. */
+export interface ChartBlock {
+  type: "chart";
+  option: ChartOption;
+  /** Px at 96 dpi; capped at the text column. */
+  widthPx?: number;
+  /** Px at 96 dpi; 0.6 of the width when absent. */
+  heightPx?: number;
+  /** Width as a percentage of the text column, when widthPx is absent. */
+  width?: number;
+  /** An Excel number format: "#,##0", "0.0%". */
+  numberFormat?: string;
+  alt?: string;
+}
+
 export interface PageBreakBlock {
   type: "pageBreak";
 }
@@ -198,6 +250,7 @@ export type Block =
   | CodeBlock
   | QuoteBlock
   | ImageBlock
+  | ChartBlock
   | PageBreakBlock
   | HrBlock;
 

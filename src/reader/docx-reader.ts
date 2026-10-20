@@ -14,6 +14,8 @@ import type { Block, Doc, ListItem, Run } from "../schema/types";
 import { unzipSync } from "../zip";
 import { at, el, els, parseXml, type XmlNode } from "./xml";
 import { EMU_PER_PX, SDT_TAG_CODE, SDT_TAG_QUOTE, splitColumns, PAGE_SIZES } from "../writer/docx-writer";
+import { NS_C, readChart } from "./chart-reader";
+import { DEFAULT_ASPECT } from "../helpers/chart";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -70,6 +72,8 @@ export class DocxReader {
   private parts: Record<string, Uint8Array> = {};
   private rels: Record<string, RelInfo> = {};
   private numOrdered: Record<string, boolean> = {};
+  /** The section's text column in twips. */
+  private contentWidth = 9360;
 
   read(bytes: Uint8Array): Doc {
     this.parts = unzipSync(bytes);
@@ -79,6 +83,10 @@ export class DocxReader {
     const docXml = this.partText("word/document.xml");
     const root = docXml ? parseXml(docXml) : null;
     const body = el(root, "body");
+
+    // Read before any block, so a chart that spans the column -- the writer's
+    // default -- reads back without a size.
+    this.contentWidth = contentWidthOf(el(body, "sectPr"));
 
     const doc: Doc = { blocks: body ? this.walkBody(body.children, {}) : [] };
 
@@ -714,6 +722,7 @@ export class DocxReader {
     if (!frame) return [];
 
     const blip = findFirst(frame, "blip");
+    if (!blip) return this.parseChartDrawing(frame);
     const rid = at(blip, "embed") ?? at(blip, "link");
     const rel = rid ? this.rels[rid] : undefined;
     if (!rel) return [];
@@ -739,6 +748,52 @@ export class DocxReader {
 
     return [block as Block];
   }
+
+  /**
+   * A drawing holding a chart, back as a chart block; [] for any drawing that is
+   * not a chart this package can model -- skipped, the read carries on.
+   */
+  private parseChartDrawing(frame: XmlNode): Block[] {
+    const graphicData = findFirst(frame, "graphicData");
+    if (!graphicData || at(graphicData, "uri") !== NS_C) return [];
+    const rid = at(el(graphicData, "chart"), "id");
+    const rel = rid ? this.rels[rid] : undefined;
+    if (!rel) return [];
+    const target = rel.target.replace(/^\.\//, "");
+    const partName = target.startsWith("/") ? target.slice(1) : `word/${target}`;
+    const xml = this.partText(partName);
+    const read = xml !== null ? readChart(xml) : null;
+    if (read === null) return [];
+
+    const block: Any = { type: "chart", option: read.option };
+
+    // The size, unless it is exactly what the writer gives a chart that names
+    // none: the text column, DEFAULT_ASPECT as tall.
+    const extent = el(frame, "extent");
+    const cx = parseInt(at(extent, "cx") ?? "0", 10) || 0;
+    const cy = parseInt(at(extent, "cy") ?? "0", 10) || 0;
+    const column = this.contentWidth * 635;
+    if (cx > 0 && cy > 0 && !(cx === column && cy === Math.round(column * DEFAULT_ASPECT))) {
+      block.widthPx = Math.round(cx / EMU_PER_PX);
+      block.heightPx = Math.round(cy / EMU_PER_PX);
+    }
+    if (read.numberFormat !== null) block.numberFormat = read.numberFormat;
+    const descr = at(el(frame, "docPr"), "descr");
+    if (descr) block.alt = descr;
+
+    return [block as Block];
+  }
+}
+
+/** Twips between the margins: page width less left and right. Mirrors PHP `contentWidthOf()`. */
+function contentWidthOf(sectPr: XmlNode | undefined): number {
+  if (!sectPr) return 9360;
+  const num = (v: string | undefined, d: number): number => (v !== undefined && /^-?\d+(\.\d+)?$/.test(v.trim()) ? Math.trunc(Number(v)) : d);
+  const w = num(at(el(sectPr, "pgSz"), "w"), 12240);
+  const pgMar = el(sectPr, "pgMar");
+  const left = num(at(pgMar, "left"), 1440);
+  const right = num(at(pgMar, "right"), 1440);
+  return Math.max(1, w - left - right);
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────

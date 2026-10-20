@@ -1,6 +1,7 @@
 import { isPlainObject } from "../util";
 import { Schema } from "./schema";
 import type { ValidationError } from "./types";
+import { SUPPORTED_CHART_TYPES, pointValue } from "../helpers/chart";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -91,6 +92,127 @@ function checkParagraphProps(block: Any, path: string): ValidationError[] {
     ...checkHex(block.shading, `${path}/shading`, "`shading`"),
     ...checkBorders(block.borders, `${path}/borders`, "`borders`", BOX_EDGES),
   ];
+}
+
+/**
+ * A chart block. Everything `chartSpec()` needs to draw is checked here, so a
+ * valid chart is always a drawable one. Mirrors PHP `Validator::validateChart()`
+ * (null counts as absent, as `isset` does there).
+ */
+export function validateChart(block: Any, path: string): ValidationError[] {
+  const errors: ValidationError[] = [];
+  const present = (v: unknown): boolean => v !== undefined && v !== null;
+
+  for (const dim of ["widthPx", "heightPx"] as const) {
+    if (present(block[dim]) && (!isNum(block[dim]) || block[dim] <= 0)) {
+      errors.push(err(`${path}/${dim}`, `Chart \`${dim}\` must be a positive number of px.`));
+    }
+  }
+  if (present(block.width) && (!isNum(block.width) || block.width <= 0 || block.width > 100)) {
+    errors.push(err(`${path}/width`, "Chart `width` must be a percentage of the text column, above 0 and at most 100."));
+  }
+  if (present(block.numberFormat) && (typeof block.numberFormat !== "string" || block.numberFormat === "")) {
+    errors.push(err(`${path}/numberFormat`, 'Chart `numberFormat` must be an Excel number format string, e.g. "#,##0" or "0.0%".'));
+  }
+  if (present(block.alt) && typeof block.alt !== "string") {
+    errors.push(err(`${path}/alt`, "Chart `alt` must be a string."));
+  }
+
+  const option = block.option;
+  if (!isPlainObject(option)) {
+    errors.push(
+      err(
+        `${path}/option`,
+        'Chart must have an `option` object: an Apache ECharts option, e.g. {"xAxis": {"type": "category", "data": ["Q1", "Q2"]}, "yAxis": {"type": "value"}, "series": [{"type": "bar", "name": "Revenue", "data": [120, 135]}]}.',
+      ),
+    );
+    return errors;
+  }
+  const optPath = `${path}/option`;
+
+  let series: Any = (option as Any).series;
+  if (isPlainObject(series)) series = [series];
+  if (!Array.isArray(series) || series.length === 0) {
+    errors.push(err(`${optPath}/series`, "Chart option must have `series`: a list of {type, name, data} objects."));
+    return errors;
+  }
+
+  const supported = SUPPORTED_CHART_TYPES.join(", ");
+  let kind: string | null = null;
+  series.forEach((one: Any, i: number) => {
+    const serPath = `${optPath}/series/${i}`;
+    if (!isPlainObject(one)) {
+      errors.push(err(serPath, "A series must be an object ({type, name, data})."));
+      return;
+    }
+    const type = one.type ?? "bar";
+    if (typeof type !== "string" || !(SUPPORTED_CHART_TYPES as readonly string[]).includes(type)) {
+      errors.push(err(`${serPath}/type`, `Series \`type\` must be one of ${supported} (a document chart cannot draw ${typeof type === "string" ? `"${type}"` : "that"}).`));
+      return;
+    }
+    if (kind === null) kind = type;
+    else if (type !== kind) {
+      errors.push(err(`${serPath}/type`, `Every series in a chart must be the same type: this one is "${type}", the first is "${kind}".`));
+    }
+    if (present(one.name) && typeof one.name !== "string" && !isNum(one.name)) {
+      errors.push(err(`${serPath}/name`, "Series `name` must be a string."));
+    }
+    errors.push(...checkHexPresent(isPlainObject(one.itemStyle) ? one.itemStyle.color : undefined, `${serPath}/itemStyle/color`, "Series colour"));
+
+    const data = one.data;
+    if (!Array.isArray(data)) {
+      const hint = one.values !== undefined ? ' (ECharts calls it "data", not "values")' : "";
+      errors.push(err(`${serPath}/data`, `Series must have a \`data\` list of numbers${hint}.`));
+      return;
+    }
+    data.forEach((point: Any, p: number) => {
+      if (pointValue(point) === null) {
+        errors.push(
+          err(`${serPath}/data/${p}`, type === "pie" ? 'A pie point must be {"name": string, "value": number}.' : 'A point must be a number, or {"value": number}.'),
+        );
+        return;
+      }
+      if (isPlainObject(point)) {
+        errors.push(...checkHexPresent(isPlainObject(point.itemStyle) ? point.itemStyle.color : undefined, `${serPath}/data/${p}/itemStyle/color`, "Point colour"));
+      }
+    });
+  });
+  if (kind === "pie" && series.length > 1) {
+    errors.push(err(`${optPath}/series`, "A pie chart takes exactly one series."));
+  }
+
+  for (const key of ["xAxis", "yAxis"] as const) {
+    let axis: Any = (option as Any)[key];
+    if (!present(axis)) continue;
+    if (Array.isArray(axis) && axis.length > 0) axis = axis[0];
+    if (!isPlainObject(axis)) {
+      errors.push(err(`${optPath}/${key}`, `\`${key}\` must be an object ({type, data, name}).`));
+      continue;
+    }
+    if (present(axis.type)) errors.push(...checkEnum(axis.type, `${optPath}/${key}/type`, `\`${key}.type\``, ["category", "value"]));
+    if (present(axis.data) && !Array.isArray(axis.data)) {
+      errors.push(err(`${optPath}/${key}/data`, `\`${key}.data\` must be a list of category labels.`));
+    }
+    if (present(axis.name) && typeof axis.name !== "string") {
+      errors.push(err(`${optPath}/${key}/name`, `\`${key}.name\` (the axis title) must be a string.`));
+    }
+  }
+
+  const color = (option as Any).color;
+  if (present(color)) {
+    if (!Array.isArray(color)) {
+      errors.push(err(`${optPath}/color`, "`option.color` must be a list of #RRGGBB colours."));
+    } else {
+      color.forEach((c: Any, i: number) => errors.push(...checkHexPresent(c, `${optPath}/color/${i}`, "Palette colour")));
+    }
+  }
+
+  return errors;
+}
+
+/** A #RRGGBB colour, or absent (null counts as absent). */
+function checkHexPresent(value: Any, path: string, label: string): ValidationError[] {
+  return value === null ? [] : checkHex(value, path, label);
 }
 
 /** Liberal schema validator. Mirrors PHP `Schema\Validator`. */
@@ -289,6 +411,10 @@ export class Validator {
         if (block.alt !== undefined && typeof block.alt !== "string") {
           errors.push(err(`${path}/alt`, "Image `alt` must be a string."));
         }
+        break;
+
+      case "chart":
+        errors.push(...validateChart(block, path));
         break;
 
       case "pageBreak":

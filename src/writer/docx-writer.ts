@@ -10,6 +10,8 @@ import { parseDataUrl, sniffImageSize } from "../helpers/image-size";
 import type { Block, Doc, ListItem, Run } from "../schema/types";
 import { zipSync, type ZipFile } from "../zip";
 import { isPlainObject } from "../util";
+import { DEFAULT_ASPECT, chartSpec, chartTitle } from "../helpers/chart";
+import { chartRelsXml, chartXml, workbookParts } from "./chart-part";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -29,6 +31,15 @@ const REL_NUMBERING = "http://schemas.openxmlformats.org/officeDocument/2006/rel
 const REL_THEME = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
 const REL_HYPERLINK = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
 const REL_IMAGE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+const REL_CHART = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
+const NS_C = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+/** EMU per twip: the text column is measured in twips, a drawing in EMU. */
+const EMU_PER_TWIP = 635;
+/**
+ * A chart's drawing id is offset from the images' so the two can never collide;
+ * Word treats a repeated wp:docPr id as a damaged document. Shared with PHP.
+ */
+const CHART_DOCPR_BASE = 10000;
 const REL_DOCUMENT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
 const REL_CORE = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties";
 /** header / footer relationship types are `${REL_BASE}/header` and `${REL_BASE}/footer`. */
@@ -342,6 +353,8 @@ export class DocxWriter {
   private hyperlinkIds = new Map<string, string>();
   private media: MediaFile[] = [];
   private drawingId = 0;
+  /** Chart parts queued for the archive, in chart order (chart N is index N-1). */
+  private charts: { xml: string; rels: string; workbook: [string, string][] }[] = [];
   /** Twips between the page margins; set from `page` before any block renders. */
   private contentWidth = 9360;
 
@@ -402,6 +415,7 @@ export class DocxWriter {
     this.hyperlinkIds = new Map();
     this.media = [];
     this.drawingId = 0;
+    this.charts = [];
 
     // Table grids are laid out against the section's content width, so it has
     // to be known before any block renders. Carrying 9360 as a literal — which
@@ -451,6 +465,17 @@ export class DocxWriter {
     for (const m of this.media) {
       files.push({ name: `word/media/${m.name}`, data: m.bytes });
     }
+    this.charts.forEach((chart, i) => {
+      const n = i + 1;
+      files.push(
+        { name: `word/charts/chart${n}.xml`, data: encode(chart.xml) },
+        { name: `word/charts/_rels/chart${n}.xml.rels`, data: encode(chart.rels) },
+        {
+          name: `word/embeddings/Microsoft_Excel_Worksheet${n}.xlsx`,
+          data: zipSync(chart.workbook.map(([name, xml]) => ({ name, data: encode(xml) }))),
+        },
+      );
+    });
     return zipSync(files);
   }
 
@@ -493,6 +518,8 @@ export class DocxWriter {
         return this.renderQuote(block);
       case "image":
         return this.renderImage(block);
+      case "chart":
+        return this.renderChart(block);
       case "pageBreak":
         return `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
       case "hr":
@@ -813,6 +840,70 @@ export class DocxWriter {
     );
   }
 
+  // ── Charts ────────────────────────────────────────────────────────────────
+
+  /**
+   * A native chart, inline, in its own paragraph. An option nothing can be drawn
+   * from (validation stops those before here) degrades to its title as text.
+   */
+  private renderChart(block: Any): string {
+    const spec = chartSpec(block.option);
+    if (spec === null) {
+      const label = chartTitle(isPlainObject(block.option) ? (block.option as Any).title : null);
+      return `<w:p><w:r><w:t xml:space="preserve">${Xml.text("[chart" + (label !== "" ? `: ${label}` : "") + "]")}</w:t></w:r></w:p>`;
+    }
+    const numberFormat = typeof block.numberFormat === "string" && block.numberFormat !== "" ? block.numberFormat : null;
+
+    const n = this.charts.length + 1;
+    this.charts.push({ xml: chartXml(spec, numberFormat), rels: chartRelsXml(n), workbook: workbookParts(spec, numberFormat) });
+    const rid = this.nextRelId();
+    this.rels.push({ id: rid, type: REL_CHART, target: `charts/chart${n}.xml`, external: false });
+
+    const [cx, cy] = this.chartExtents(block);
+    const alt = typeof block.alt === "string" ? block.alt : "";
+    const descr = alt === "" ? "" : ` descr="${Xml.attr(alt)}"`;
+
+    return (
+      `<w:p><w:r><w:drawing>` +
+      `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
+      `<wp:extent cx="${cx}" cy="${cy}"/>` +
+      `<wp:effectExtent l="0" t="0" r="0" b="0"/>` +
+      `<wp:docPr id="${CHART_DOCPR_BASE + n}" name="Chart ${n}"${descr}/>` +
+      `<wp:cNvGraphicFramePr/>` +
+      `<a:graphic><a:graphicData uri="${NS_C}">` +
+      `<c:chart xmlns:c="${NS_C}" r:id="${rid}"/>` +
+      `</a:graphicData></a:graphic>` +
+      `</wp:inline>` +
+      `</w:drawing></w:r></w:p>`
+    );
+  }
+
+  /**
+   * A chart's extents in EMU. Width: widthPx, else `width` percent of the text
+   * column, else the whole column -- never wider than the column. Height:
+   * heightPx (scaled with the width when the width was capped), else
+   * DEFAULT_ASPECT of the width. Mirrors PHP `chartExtents()`.
+   */
+  private chartExtents(block: Any): [number, number] {
+    const column = this.contentWidth * EMU_PER_TWIP;
+    const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    const widthPx = num(block.widthPx);
+    const heightPx = num(block.heightPx);
+    const percent = num(block.width);
+
+    let cx = column;
+    if (widthPx !== null && widthPx > 0) cx = Math.round(widthPx * EMU_PER_PX);
+    else if (percent !== null && percent > 0) cx = Math.round((column * Math.min(100, percent)) / 100);
+    let cy: number | null = heightPx !== null && heightPx > 0 ? Math.round(heightPx * EMU_PER_PX) : null;
+
+    if (cx > column) {
+      if (cy !== null) cy = Math.round((cy * column) / cx);
+      cx = column;
+    }
+    cx = Math.max(1, cx);
+    return [cx, Math.max(1, cy ?? Math.round(cx * DEFAULT_ASPECT))];
+  }
+
   // ── Parts ─────────────────────────────────────────────────────────────────
 
   private sectPr(page: PageGeometry): string {
@@ -837,6 +928,9 @@ export class DocxWriter {
     for (const ext of exts) {
       defaults += `<Default Extension="${ext}" ContentType="${mimeForExt(ext)}"/>`;
     }
+    if (this.charts.length > 0) {
+      defaults += `<Default Extension="xlsx" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"/>`;
+    }
     let overrides =
       `<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>` +
       `<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>` +
@@ -849,6 +943,9 @@ export class DocxWriter {
     for (const b of this.bands) {
       overrides += `<Override PartName="/word/${b.kind}1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${b.kind}+xml"/>`;
     }
+    this.charts.forEach((_, i) => {
+      overrides += `<Override PartName="/word/charts/chart${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>`;
+    });
     if (doc.title !== undefined) {
       overrides += `<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>`;
     }

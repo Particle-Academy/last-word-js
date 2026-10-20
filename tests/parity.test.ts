@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, unzipSync } from "../src";
+import chartCases from "../test/fixtures/charts.json";
 
 /**
  * Cross-engine WRITER parity — the guarantee this pair was missing.
@@ -250,6 +251,20 @@ const KNOWN_DIVERGENT_PARTS: Record<string, string> = {
     "document contains; PHP's lists still render, they are just less explicitly typed.",
 };
 
+/**
+ * Every chart case (last-word#4), shared verbatim with PHP and Python. A chart is
+ * new, so it carries NO ledger: its document body, chart part, relationships and
+ * every part of its embedded workbook must match PHP exactly. Only the three
+ * boilerplate parts already in KNOWN_DIVERGENT_PARTS may differ.
+ */
+const CHART_DOCS: Record<string, unknown> = Object.fromEntries(
+  Object.entries(chartCases)
+    .filter(([name]) => name !== "_comment")
+    .map(([name, doc]) => [`chart_${name}`, doc]),
+);
+
+const BOILERPLATE_ONLY = ["[Content_Types].xml", "word/numbering.xml", "word/styles.xml"];
+
 const HAS_PHP = phpAvailable();
 
 /**
@@ -323,6 +338,40 @@ describe.skipIf(!HAS_PHP)("cross-engine writer parity (PHP vs TS)", () => {
             "parts diverge everywhere (see KNOWN_DIVERGENT_PARTS), but this one must not",
         ).not.toContain("word/document.xml");
       }
+    });
+  }
+
+  for (const [name, doc] of Object.entries(CHART_DOCS)) {
+    it(`emits the same chart parts as PHP, workbook included: ${name}`, () => {
+      const { phpParts, tsParts } = writeBoth(name, doc);
+      expect(Object.keys(tsParts).sort(), "the two engines wrote different part sets").toEqual(Object.keys(phpParts).sort());
+      expect(Object.keys(phpParts)).toContain("word/charts/chart1.xml");
+
+      const dec = new TextDecoder();
+      const differing: string[] = [];
+      for (const part of Object.keys(phpParts)) {
+        if (part.endsWith(".xlsx")) {
+          // A nested package: PHP deflates it and this port stores it, so the
+          // container can never match -- its PARTS must, every one.
+          const phpInner = unzipSync(phpParts[part]!);
+          const tsInner = unzipSync(tsParts[part]!);
+          expect(Object.keys(tsInner), `${part}: workbook part list`).toEqual(Object.keys(phpInner));
+          for (const inner of Object.keys(phpInner)) {
+            expect(dec.decode(tsInner[inner]!), `${part} > ${inner}`).toBe(dec.decode(phpInner[inner]!));
+          }
+          continue;
+        }
+        if (dec.decode(phpParts[part]!) !== dec.decode(tsParts[part]!)) differing.push(part);
+      }
+      expect(differing.filter((p) => !BOILERPLATE_ONLY.includes(p)), "a chart document diverged outside the known boilerplate").toEqual([]);
+    });
+
+    it(`reads PHP's chart back to the same document: ${name}`, () => {
+      const docFile = join(dir, `${name}.read.json`);
+      const phpOut = join(dir, `${name}.read.php.docx`);
+      writeFileSync(docFile, JSON.stringify(doc));
+      php([PHP_SCRIPT, docFile, phpOut]);
+      expect(Agent.read(new Uint8Array(readFileSync(phpOut)))).toEqual(doc);
     });
   }
 

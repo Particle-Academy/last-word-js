@@ -8,6 +8,7 @@
  */
 
 import type { Block, Doc, ListItem, Run } from "../schema/types";
+import { chartNum, chartSpec } from "../helpers/chart";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -49,6 +50,8 @@ function blockToMarkdown(block: Any): string | null {
       const alt = typeof block.alt === "string" ? block.alt : "";
       return `![${alt.replace(/([[\]\\])/g, "\\$1")}](${String(block.src ?? "")})`;
     }
+    case "chart":
+      return chartToMarkdown(block);
     case "hr":
       return "---";
     case "pageBreak":
@@ -90,6 +93,28 @@ function tableToMarkdown(block: Any): string {
   lines.push("| " + Array.from({ length: cols }, () => "---").join(" | ") + " |");
   for (let r = 1; r < rows.length; r++) lines.push(lineOf(rows[r]));
   return lines.join("\n");
+}
+
+/**
+ * A chart as the data it plots: its title in bold, then a table with a column of
+ * categories and one column per series. (Read back, a paragraph and a table --
+ * not a chart.) Mirrors PHP `ToMarkdown::chart()`.
+ */
+function chartToMarkdown(block: Any): string | null {
+  const spec = chartSpec(block.option);
+  if (spec === null) return null;
+  const cell = (text: string): Any => ({ blocks: [{ type: "paragraph", runs: [{ text }] }] });
+
+  const rows: Any[] = [{ cells: [cell(spec.categoryTitle), ...spec.series.map((s) => cell(s.name))] }];
+  let count = spec.categories.length;
+  for (const s of spec.series) count = Math.max(count, s.values.length);
+  for (let r = 0; r < count; r++) {
+    const label = spec.categories[r] ?? (spec.categories.length === 0 ? String(r + 1) : "");
+    rows.push({ cells: [cell(label), ...spec.series.map((s) => cell(r < s.values.length ? chartNum(s.values[r]!) : ""))] });
+  }
+
+  const table = tableToMarkdown({ rows });
+  return spec.title !== "" ? inline([{ text: spec.title, bold: true }]) + "\n\n" + table : table;
 }
 
 function cellInline(cell: Any): string {

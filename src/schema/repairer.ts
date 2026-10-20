@@ -1,9 +1,51 @@
 import { clone, isNumeric, isPlainObject } from "../util";
 import { Schema } from "./schema";
 import type { ValidationError } from "./types";
+import { validateChart } from "./validator";
+import { chartLabel } from "../helpers/chart";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
+
+/** `{chartType, title, categories, series: [{name, values, color}]}` as the chart block it stands for. */
+function chartFromShorthand(block: Any): Record<string, unknown> {
+  const chartType = typeof block.chartType === "string" ? block.chartType.toLowerCase() : "column";
+  const type = chartType === "line" ? "line" : chartType === "pie" ? "pie" : "bar";
+  const categories: Any[] = Array.isArray(block.categories) ? block.categories : [];
+
+  const series: Record<string, unknown>[] = [];
+  for (const one of block.series as Any[]) {
+    if (!isPlainObject(one)) continue;
+    const o = one as Any;
+    const out: Record<string, unknown> = { type };
+    if (o.name !== undefined) out.name = o.name;
+    const values: Any[] = Array.isArray(o.values) ? o.values : Array.isArray(o.data) ? o.data : [];
+    out.data = type === "pie" ? values.map((value, i) => ({ name: chartLabel(categories[i]) ?? `Slice ${i + 1}`, value })) : values;
+    if (typeof o.color === "string") out.itemStyle = { color: o.color };
+    series.push(out);
+  }
+
+  const option: Record<string, unknown> = {};
+  if (typeof block.title === "string" && block.title !== "") option.title = { text: block.title };
+  if (type !== "pie") {
+    const category = { type: "category", data: categories };
+    const value = { type: "value" };
+    if (chartType === "bar") {
+      option.xAxis = value;
+      option.yAxis = category;
+    } else {
+      option.xAxis = category;
+      option.yAxis = value;
+    }
+  }
+  option.series = series;
+
+  const out: Record<string, unknown> = { type: "chart", option };
+  for (const key of ["widthPx", "heightPx", "width", "numberFormat", "alt"]) {
+    if (key in block) out[key] = block[key];
+  }
+  return out;
+}
 
 /**
  * Heuristic doc repair. Mirrors PHP `Schema\Repairer`. Never mutates input.
@@ -112,11 +154,61 @@ export class Repairer {
         if (block.alt !== undefined && typeof block.alt !== "string") delete block.alt;
         break;
 
+      case "chart":
+        return this.repairChart(block, path);
+
       case "pageBreak":
       case "hr":
         break;
     }
 
+    return block;
+  }
+
+  /**
+   * A chart block. Repairs the SHORTHAND an agent reaches for --
+   * `{chartType, title, categories, series: [{name, values, color}]}`, where
+   * `chartType` takes Word's words (column, bar = horizontal, line, pie) -- into
+   * the ECharts option it stands for, and `series[].values` into `data`. A chart
+   * that still cannot be drawn is dropped, with the reason kept. Mirrors PHP
+   * `Repairer::repairChart()`.
+   */
+  private repairChart(input: Any, path: string): Record<string, unknown> | null {
+    let block: Any = input;
+    if (!isPlainObject(block.option) && Array.isArray(block.series)) {
+      block = chartFromShorthand(block);
+      this.notes.push({ path: `${path}/option`, message: "Converted the chart shorthand (chartType / categories / series[].values) to an ECharts option." });
+    }
+
+    const option = block.option;
+    if (isPlainObject(option) && Array.isArray((option as Any).series)) {
+      (option as Any).series = (option as Any).series.map((series: Any, i: number) => {
+        if (isPlainObject(series) && (series as Any).data === undefined && Array.isArray((series as Any).values)) {
+          const { values, ...rest } = series as Any;
+          this.notes.push({ path: `${path}/option/series/${i}/data`, message: 'Renamed series "values" to "data", as ECharts names it.' });
+          return { ...rest, data: values };
+        }
+        return series;
+      });
+    }
+
+    for (const key of ["widthPx", "heightPx"] as const) {
+      if (block[key] !== undefined && block[key] !== null && !(typeof block[key] === "number" && Number.isFinite(block[key]) && block[key] > 0)) {
+        delete block[key];
+      }
+    }
+    if (block.width !== undefined && block.width !== null && !(typeof block.width === "number" && block.width > 0 && block.width <= 100)) {
+      delete block.width;
+    }
+    if (block.numberFormat !== undefined && block.numberFormat !== null && !(typeof block.numberFormat === "string" && block.numberFormat !== "")) {
+      delete block.numberFormat;
+    }
+    if (block.alt !== undefined && block.alt !== null && typeof block.alt !== "string") delete block.alt;
+
+    if (validateChart(block, path).length > 0) {
+      this.notes.push({ path, message: "Dropped a chart that cannot be drawn (see Agent.validate() for why)." });
+      return null;
+    }
     return block;
   }
 
