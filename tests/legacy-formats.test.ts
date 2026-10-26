@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { deflateRawSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
-import { Agent, UnsupportedFormatException, zipSync } from "../src";
+import { Agent, ArchiveRefused, UnsupportedFormatException, zipSync } from "../src";
 import * as L from "./support/legacy-files";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -273,17 +273,21 @@ describe("damaged and hostile files fail fast, and say what is wrong", () => {
     expect(cells).toBeLessThanOrEqual(5 * 1000 + 100_000 + 1000);
   });
 
-  it("stops inflating an ODT part at 64 MB whatever its entry declares", () => {
+  it("bounds ODT inflation by its declared output budget", () => {
     // A zip bomb: 65 MB of spaces deflate to a few kilobytes, and the entry
     // claims to be tiny. Only an inflater that counts its output stops it.
     const huge = deflateRawSync(Buffer.alloc(65 * 1024 * 1024, 0x20));
     const bytes = bombZip("content.xml", new Uint8Array(huge), 100);
-    damaged(bytes, "ODT part content.xml is too large to read");
+    const error = thrown(() => Agent.read(bytes));
+    expect(error).toBeInstanceOf(ArchiveRefused);
+    expect(error).toMatchObject({ reason: "archive_corrupt" });
   });
 
   it("refuses a truncated DEFLATE stream rather than inventing the missing bytes", () => {
     const deflated = new Uint8Array(deflateRawSync(Buffer.from("<office:document-content/>".repeat(50))));
-    damaged(bombZip("content.xml", deflated.subarray(0, 4), 1300), "Could not open the ODT archive");
+    const error = thrown(() => Agent.read(bombZip("content.xml", deflated.subarray(0, 4), 1300)));
+    expect(error).toBeInstanceOf(ArchiveRefused);
+    expect(error).toMatchObject({ reason: "archive_corrupt" });
   });
 
   it("refuses RTF nested past any real document", () => {

@@ -7,6 +7,7 @@
 import agentGuide from "./agent-guide.json";
 import { SchemaException, UnsupportedFormatException } from "./exceptions";
 import { DocxTemplate } from "./writer/docx-template";
+import { readFileBounded } from "./reader/file-input";
 import { TemplateException } from "./exceptions";
 import { fromMarkdown } from "./markdown/from-markdown";
 import { toMarkdown } from "./markdown/to-markdown";
@@ -151,7 +152,11 @@ export const Agent = {
 
     let resolved = options;
     if (typeof options?.template === "string") {
-      resolved = { ...options, template: fs.readFileSync(options.template) };
+      try {
+        resolved = { ...options, template: await readFileBounded(options.template) };
+      } catch (cause) {
+        throw new TemplateException("The template file could not be read within the archive limits.", cause);
+      }
     }
 
     const bytes = new DocxWriter(templateFrom(resolved)).toBytes(doc);

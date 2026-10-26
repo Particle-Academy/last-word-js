@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Harden public `unzipSync()`, DOCX/ODT readers and template reads against ZIP
+  bombs, duplicate/unsafe names, CRC/size mismatch, inconsistent metadata and
+  truncation. Inflation and Node template file input are bounded before allocation.
+  `ArchiveRefused.reason` is typed; templates retain it as `TemplateException.reason`.
+  `unzipSync()` accepts `ArchiveLimits`; valid fixtures and projections are
+  unchanged. No runtime dependency added.
+
 - Update Vitest to 4.1.12 for security fixes; dev toolchain only, nothing to do.
 
 - **Dev toolchain only — no runtime change, nothing for consumers to do.** The

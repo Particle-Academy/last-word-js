@@ -81,15 +81,7 @@ export class OdtReader {
   // ─── Archive ──────────────────────────────────────────────────────────
 
   private parts(bytes: Uint8Array): Record<string, string> {
-    let entries: Record<string, Uint8Array>;
-    try {
-      entries = unzipEntries(bytes, ["content.xml", "styles.xml", "meta.xml"], MAX_PART_BYTES);
-    } catch (e) {
-      const message = (e as Error).message;
-      const large = /^zip entry (\S+) is too large/.exec(message);
-      if (large) throw new Error(`ODT part ${large[1]} is too large to read.`);
-      throw new Error("Could not open the ODT archive.");
-    }
+    const entries = unzipEntries(bytes, ["content.xml", "styles.xml", "meta.xml"], MAX_PART_BYTES);
     if (entries["content.xml"] === undefined) throw new Error("ODT archive has no content.xml.");
 
     const parts: Record<string, string> = {};

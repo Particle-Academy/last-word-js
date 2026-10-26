@@ -1,5 +1,6 @@
 export { Agent, VERSION, type WriteOptions } from "./agent";
-export { SchemaException, UnsupportedFormatException, TemplateException } from "./exceptions";
+export { SchemaException, UnsupportedFormatException, TemplateException, ArchiveRefused } from "./exceptions";
+export type { ArchiveLimits } from "./zip/source-archive";
 export * from "./schema/types";
 
 // Lower-level building blocks (advanced use / parity with PHP services).

@@ -58,8 +58,17 @@ function buildTree(t: Tree, lengths: Uint8Array, off: number, num: number): void
   let i: number;
   let sum = 0;
   for (i = 0; i < 16; i++) t.table[i] = 0;
-  for (i = 0; i < num; i++) t.table[lengths[off + i]!]!++;
+  for (i = 0; i < num; i++) {
+    const length = lengths[off + i];
+    if (length === undefined || length > 15) throw new Error("holy-sheet: invalid DEFLATE tree");
+    t.table[length]!++;
+  }
   t.table[0] = 0;
+  let slots = 1;
+  for (i = 1; i <= 15; i++) {
+    slots = slots * 2 - t.table[i]!;
+    if (slots < 0) throw new Error("holy-sheet: oversubscribed DEFLATE tree");
+  }
   for (i = 0; i < 16; i++) {
     OFFS[i] = sum;
     sum += t.table[i]!;
@@ -82,6 +91,7 @@ class Reader {
 
 function getBit(d: Reader): number {
   if (d.bitcount-- === 0) {
+    if (d.index >= d.source.length) throw new Error("holy-sheet: truncated DEFLATE input");
     d.tag = d.source[d.index++]!;
     d.bitcount = 7;
   }
@@ -104,6 +114,7 @@ function decodeSymbol(d: Reader, t: Tree): number {
   do {
     cur = 2 * cur + getBit(d);
     len++;
+    if (len > 15) throw new Error("holy-sheet: invalid DEFLATE code");
     sum += t.table[len]!;
     cur -= t.table[len]!;
   } while (cur >= 0);
@@ -115,6 +126,7 @@ function decodeTrees(d: Reader, lt: Tree, dt: Tree): void {
   const hlit = readBits(d, 5, 257);
   const hdist = readBits(d, 5, 1);
   const hclen = readBits(d, 4, 4);
+  if (hlit > 286) throw new Error("holy-sheet: invalid DEFLATE literal count");
   let i: number;
   for (i = 0; i < 19; i++) lengths[i] = 0;
   for (i = 0; i < hclen; i++) {
@@ -127,35 +139,43 @@ function decodeTrees(d: Reader, lt: Tree, dt: Tree): void {
     const sym = decodeSymbol(d, codeTree);
     switch (sym) {
       case 16: {
+        if (num === 0) throw new Error("holy-sheet: invalid DEFLATE repeat");
         const prev = lengths[num - 1]!;
-        for (let length = readBits(d, 2, 3); length; length--) lengths[num++] = prev;
+        const repeat = readBits(d, 2, 3);
+        if (num + repeat > hlit + hdist) throw new Error("holy-sheet: invalid DEFLATE repeat");
+        for (let length = repeat; length; length--) lengths[num++] = prev;
         break;
       }
-      case 17:
-        for (let length = readBits(d, 3, 3); length; length--) lengths[num++] = 0;
+      case 17: {
+        const repeat = readBits(d, 3, 3);
+        if (num + repeat > hlit + hdist) throw new Error("holy-sheet: invalid DEFLATE repeat");
+        for (let length = repeat; length; length--) lengths[num++] = 0;
         break;
-      case 18:
-        for (let length = readBits(d, 7, 11); length; length--) lengths[num++] = 0;
+      }
+      case 18: {
+        const repeat = readBits(d, 7, 11);
+        if (num + repeat > hlit + hdist) throw new Error("holy-sheet: invalid DEFLATE repeat");
+        for (let length = repeat; length; length--) lengths[num++] = 0;
         break;
+      }
       default:
         lengths[num++] = sym;
         break;
     }
   }
+  if (lengths[256] === 0) throw new Error("holy-sheet: missing DEFLATE end code");
   buildTree(lt, lengths, 0, hlit);
   buildTree(dt, lengths, hlit, hdist);
 }
 
 class Out {
-  buf = new Uint8Array(1024);
+  buf: Uint8Array;
   len = 0;
-  constructor(private readonly limit: number) {}
+  constructor(readonly limit: number) { this.buf = new Uint8Array(Math.min(1024, limit)); }
   push(b: number): void {
-    if (this.len >= this.limit) {
-      throw new Error("inflated data is larger than allowed");
-    }
+    if (this.len >= this.limit) throw new Error("holy-sheet: DEFLATE output limit exceeded");
     if (this.len >= this.buf.length) {
-      const next = new Uint8Array(this.buf.length * 2);
+      const next = new Uint8Array(Math.min(this.limit, Math.max(1, this.buf.length * 2)));
       next.set(this.buf);
       this.buf = next;
     }
@@ -165,18 +185,18 @@ class Out {
 
 function inflateBlockData(d: Reader, out: Out, lt: Tree, dt: Tree): void {
   for (;;) {
-    // Reading past the end yields zero bits forever; a truncated stream must
-    // stop here rather than decode them.
-    if (d.index > d.source.length) throw new Error("DEFLATE stream is truncated");
     const sym = decodeSymbol(d, lt);
     if (sym === 256) return;
     if (sym < 256) {
       out.push(sym);
     } else {
       const lengthSym = sym - 257;
+      if (lengthSym < 0 || lengthSym >= LENGTH_BITS.length) throw new Error("holy-sheet: invalid DEFLATE length");
       const length = readBits(d, LENGTH_BITS[lengthSym]!, LENGTH_BASE[lengthSym]!);
       const distSym = decodeSymbol(d, dt);
+      if (distSym < 0 || distSym >= DIST_BITS.length) throw new Error("holy-sheet: invalid DEFLATE distance");
       const dist = readBits(d, DIST_BITS[distSym]!, DIST_BASE[distSym]!);
+      if (dist > out.len) throw new Error("holy-sheet: DEFLATE distance before output");
       const offs = out.len - dist;
       for (let i = 0; i < length; i++) out.push(out.buf[offs + i]!);
     }
@@ -186,18 +206,21 @@ function inflateBlockData(d: Reader, out: Out, lt: Tree, dt: Tree): void {
 function inflateUncompressedBlock(d: Reader, out: Out): void {
   // discard remaining bits in the current (partial) byte
   d.bitcount = 0;
+  if (d.index + 4 > d.source.length) throw new Error("holy-sheet: truncated DEFLATE input");
   let length = d.source[d.index + 1]! * 256 + d.source[d.index]!;
+  const complement = d.source[d.index + 3]! * 256 + d.source[d.index + 2]!;
+  if ((length ^ complement) !== 0xffff) throw new Error("holy-sheet: invalid DEFLATE stored length");
   d.index += 4; // skip LEN + NLEN
+  if (d.index + length > d.source.length) throw new Error("holy-sheet: truncated DEFLATE input");
   for (; length; length--) out.push(d.source[d.index++]!);
 }
 
-/**
- * Inflate a raw DEFLATE stream. `maxBytes` caps the output, so a small archive
- * entry cannot expand without bound (a zip bomb); it throws when exceeded.
- */
-export function inflateRaw(source: Uint8Array, maxBytes = Number.POSITIVE_INFINITY): Uint8Array {
+export function inflateRaw(source: Uint8Array, maxOutputBytes = Number.POSITIVE_INFINITY): Uint8Array {
+  if (maxOutputBytes !== Number.POSITIVE_INFINITY && (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 0)) {
+    throw new Error("holy-sheet: invalid DEFLATE output limit");
+  }
   const d = new Reader(source);
-  const out = new Out(maxBytes);
+  const out = new Out(maxOutputBytes);
   const lt = new Tree();
   const dt = new Tree();
   let bfinal: number;
@@ -213,9 +236,8 @@ export function inflateRaw(source: Uint8Array, maxBytes = Number.POSITIVE_INFINI
       decodeTrees(d, lt, dt);
       inflateBlockData(d, out, lt, dt);
     } else {
-      throw new Error("dark-slide: invalid DEFLATE block type");
+      throw new Error("holy-sheet: invalid DEFLATE block type");
     }
-    if (d.index > source.length) throw new Error("DEFLATE stream is truncated");
   } while (!bfinal);
   return out.buf.subarray(0, out.len);
 }

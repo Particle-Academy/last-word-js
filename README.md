@@ -10,6 +10,13 @@ Sister to [`holy-sheet`](https://github.com/Particle-Academy/holy-sheet-js)
 (xlsx) and [`dark-slide`](https://github.com/Particle-Academy/dark-slide-js)
 (pptx).
 
+DOCX, ODT and template archives enforce 64 MiB input/part, 256 MiB expanded data,
+16,384 members and 1000:1 expansion. Invalid, duplicate, unsafe or unsupported
+entries raise the exported `ArchiveRefused` with a constant `reason`. Templates
+retain it as `TemplateException.reason`; Node template file input is bounded
+to 64 MiB too. Advanced callers can pass `ArchiveLimits` to `unzipSync()`.
+These archive checks do not promise support for every document XML construct.
+
 The point is the **Editor round-trip**: a WYSIWYG editor (react-fancy
 `Editor`) speaks markdown; Word speaks `.docx`. LastWord bridges the two
 through one JSON model — `fromMarkdown → toBytes` to export a real Word file,
