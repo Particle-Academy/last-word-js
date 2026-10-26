@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Update Vitest to 4.1.12 for security fixes; dev toolchain only, nothing to do.
+
 - **Dev toolchain only — no runtime change, nothing for consumers to do.** The
   lockfile now resolves `vite` 8.3.5 (was 8.2.2), whose bundled
   `launch-editor` fixes GHSA-587h-7wmj-h5pm (HIGH, `fs.existsSync()` check
