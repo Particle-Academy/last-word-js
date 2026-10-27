@@ -26,6 +26,7 @@ import { Schema } from "./schema/schema";
 import type { Block, Doc, ListItem, RepairResult, ValidationError, WriteResult } from "./schema/types";
 import { Validator } from "./schema/validator";
 import { DocxWriter } from "./writer/docx-writer";
+import { convert as convertOfficeTemplate, type SourceKind } from "./zip/office-template";
 
 /** This package's own version, pinned to package.json by `version.test.ts`. */
 export const VERSION = "0.10.1";
@@ -200,6 +201,33 @@ export const Agent = {
     }
   },
 
+  /**
+   * Turn a Word `.dotx` / LibreOffice `.ott` template into its `.docx` / `.odt`
+   * twin, or back. `to` is `document`, `template`, or null/omitted to flip.
+   * Mirrors PHP `Agent::convertTemplate()`.
+   *
+   * Only the declaration moves: the main part's content type in
+   * `[Content_Types].xml`, or the ODF `mimetype` entry together with the
+   * manifest's root media-type (ODF 1.3 requires them to agree). Every other
+   * member is copied as its original zip record, byte for byte.
+   *
+   * Macro-enabled packages (.dotm, .docm) are refused, never converted. Throws
+   * `OfficeTemplateRefused`, `ArchiveRefused`, or `UnsupportedFormatException`
+   * for anything that is not a Word or ODF text package.
+   */
+  convertTemplate(input: Uint8Array | ArrayBuffer, to: SourceKind | null = null): Uint8Array {
+    const bytes = toU8(input);
+    const format = detectFormat(bytes);
+    if (format !== Format.DOCX && format !== Format.ODT) {
+      throw new UnsupportedFormatException(
+        format,
+        "Agent.convertTemplate() converts Word (.dotx/.docx) and OpenDocument text (.ott/.odt) packages"
+          + (format === Format.UNKNOWN ? "; these bytes are neither." : `; this is a .${format} file.`),
+      );
+    }
+    return convertOfficeTemplate(bytes, to);
+  },
+
   /** Alias for {@see read}. */
   fromBytes(input: Uint8Array | ArrayBuffer): Doc {
     return this.read(input);
@@ -300,6 +328,11 @@ export const Agent = {
     return VERSION;
   },
 };
+
+/** {@link Agent.convertTemplate} as a plain function. */
+export function convertTemplate(input: Uint8Array | ArrayBuffer, to: SourceKind | null = null): Uint8Array {
+  return Agent.convertTemplate(input, to);
+}
 
 /** Prose word count: every run in headings, paragraphs, lists, tables, quotes. */
 function countWords(blocks: Block[]): number {

@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Word `.dotx` and LibreOffice `.ott` templates.** `Agent.read()` reads them
+  exactly as their `.docx` / `.odt` twins and adds `sourceKind: "template"`.
+  Document reads are unchanged and carry no `sourceKind` key, so nothing to do
+  unless you want to tell the two apart. Mirrors PHP `particle-academy/last-word`.
+- **`Agent.convertTemplate(bytes, to?)` / `convertTemplate()`** and a
+  `last-word` bin: `npx last-word template:convert <in> <out> [--to=document|template] [--force]`
+  turn a template into its document twin and back. Only the declaration is
+  rewritten: the main part's content-type value (OOXML), or the `mimetype`
+  entry plus the manifest root's `media-type` (ODF 1.3 Part 2 section 3.3
+  requires them to agree). Every other zip member is copied as its original
+  record, byte for byte; `mimetype` stays first and stored. The bin is a
+  separate, Node-only build entry (`dist/cli.js`); the package index stays
+  isomorphic.
+- `OfficeTemplateRefused` with a constant `reason`, and the `SourceKind` type.
+
+### Changed
+
+- **A macro-enabled template (`.dotm`) is now refused** with
+  `OfficeTemplateRefused` reason `macro_enabled`; it used to be read as a
+  document with its VBA silently ignored. So is a `.dotx` carrying a
+  `vbaProject.bin`. A `.docm` still reads as before but is never converted.
+  Re-save a `.dotm` as `.dotx` if you need it read.
+- A package that declares a template of another family (a PowerPoint or Excel
+  template type, an ODF `presentation-template`, a `text-template` whose body is
+  a spreadsheet) is refused with `family_mismatch` instead of being read as
+  whatever its parts looked like.
+- The ESM build now splits shared code into a chunk (`dist/chunk-*.js`) because
+  it has two entries. Import paths are unchanged.
+
 ## [0.10.1] - 2026-10-26
 
 ### Security

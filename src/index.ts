@@ -1,5 +1,6 @@
-export { Agent, VERSION, type WriteOptions } from "./agent";
-export { SchemaException, UnsupportedFormatException, TemplateException, ArchiveRefused } from "./exceptions";
+export { Agent, VERSION, convertTemplate, type WriteOptions } from "./agent";
+export { SchemaException, UnsupportedFormatException, TemplateException, ArchiveRefused, OfficeTemplateRefused } from "./exceptions";
+export type { SourceKind } from "./zip/office-template";
 export type { ArchiveLimits } from "./zip/source-archive";
 export * from "./schema/types";
 

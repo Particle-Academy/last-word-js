@@ -11,7 +11,8 @@
 
 import { base64Encode } from "../helpers/image-size";
 import type { Block, Doc, ListItem, Run } from "../schema/types";
-import { unzipSync } from "../zip";
+import { SourceArchive } from "../zip/source-archive";
+import { TEMPLATE, sourceKind } from "../zip/office-template";
 import { at, el, els, parseXml, type XmlNode } from "./xml";
 import { EMU_PER_PX, SDT_TAG_CODE, SDT_TAG_QUOTE, splitColumns, PAGE_SIZES } from "../writer/docx-writer";
 import { NS_C, readChart } from "./chart-reader";
@@ -76,7 +77,10 @@ export class DocxReader {
   private contentWidth = 9360;
 
   read(bytes: Uint8Array): Doc {
-    this.parts = unzipSync(bytes);
+    const source = SourceArchive.open(bytes);
+    const kind = sourceKind(source);
+    this.parts = Object.create(null) as Record<string, Uint8Array>;
+    for (const name of source.names()) this.parts[name] = source.read(name)!;
     this.rels = this.loadRels("word/_rels/document.xml.rels");
     this.numOrdered = this.loadNumbering();
 
@@ -102,6 +106,8 @@ export class DocxReader {
     const defaults = this.readDocDefaults();
     if (defaults.font !== null) (doc as Any).defaultFont = defaults.font;
     if (defaults.size !== null) (doc as Any).defaultSize = defaults.size;
+    // A .dotx reads exactly like its .docx twin, and says so.
+    if (kind === TEMPLATE) (doc as Any).sourceKind = TEMPLATE;
 
     return doc;
   }

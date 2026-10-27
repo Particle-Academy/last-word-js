@@ -215,6 +215,38 @@ What it cannot read it refuses with `UnsupportedFormatException`, whose
 `ods`, `odp`, or `unknown`. A damaged file in a supported format throws a
 plain `Error` instead.
 
+## Word and LibreOffice templates (.dotx, .ott)
+
+A `.dotx` is a `.docx` whose main part is declared a template; an `.ott` is an
+`.odt` whose `mimetype` (and manifest root entry) says `text-template`.
+`Agent.read()` reads both exactly as it reads their twins and adds
+`sourceKind: "template"`. A document read has no `sourceKind` key, as before.
+
+```ts
+import { Agent, convertTemplate } from "@particle-academy/last-word";
+
+Agent.read(dotxBytes).sourceKind;     // "template"
+convertTemplate(dotxBytes);           // .docx bytes ("document" | "template" | null = flip)
+```
+
+```
+npx last-word template:convert letterhead.dotx letterhead.docx
+npx last-word template:convert memo.odt memo.ott --to=template
+```
+
+Conversion rewrites only the declaration: the content-type value in
+`[Content_Types].xml`, or the ODF `mimetype` entry plus the manifest's root
+`media-type` (ODF 1.3 requires the two to match). Every other member is copied
+as its original zip record, byte for byte, and `mimetype` stays first and
+stored. No reader or writer is in the path.
+
+Refused with `OfficeTemplateRefused` (a constant `reason`): macro-enabled
+templates `.dotm` (`macro_enabled`; never read, never converted, and a `.docm`
+is not converted either), a package declaring a template of another family or
+whose parts disagree with its declaration (`family_mismatch`). The archive
+guards apply first, so bombs and unsafe names throw `ArchiveRefused` as for any
+document. Same behaviour, reasons and output bytes as the PHP package.
+
 ## Cross-language parity
 
 As of 0.2.0 the metadata slots match the PHP mirror exactly: the title is

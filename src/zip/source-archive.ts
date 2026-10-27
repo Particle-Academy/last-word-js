@@ -12,12 +12,35 @@ export const DEFAULT_ARCHIVE_LIMITS: Readonly<Required<ArchiveLimits>> = Object.
   maxArchiveBytes: 67108864, maxEntries: 16384, maxPartBytes: 67108864,
   maxExpandedBytes: 268435456, maxCompressionRatio: 1000,
 });
-type Part = { name: string; method: number; crc: number; size: number; compressed: number; start: number };
+type Part = { name: string; method: number; crc: number; size: number; compressed: number; start: number } & ArchiveEntry;
+
+/**
+ * A verified member: where its local record starts and ends in `toBytes()`
+ * (data descriptor included) and where its central record sits. Lets a caller
+ * copy a member as raw bytes, which keeps it byte-identical without re-encoding.
+ */
+export interface ArchiveEntry {
+  name: string;
+  size: number;
+  crc: number;
+  local: number;
+  finish: number;
+  central: number;
+  centralLength: number;
+  flags: number;
+  method: number;
+  localExtra: number;
+}
 const corrupt = (): never => { throw new ArchiveRefused("archive_corrupt"); };
 
 /** @internal Bounded, immutable reader source. No extraction or network. */
 export class SourceArchive {
-  private constructor(private readonly original: Uint8Array, private readonly parts: Map<string, Uint8Array>) {}
+  private constructor(
+    private readonly original: Uint8Array,
+    private readonly parts: Map<string, Uint8Array>,
+    private readonly records: ArchiveEntry[] = [],
+    private readonly archiveComment: Uint8Array = new Uint8Array(),
+  ) {}
 
   static open(input: Uint8Array, options: ArchiveLimits = {}): SourceArchive {
     for (const [key, value] of Object.entries(options)) {
@@ -26,7 +49,7 @@ export class SourceArchive {
     const limits = { ...DEFAULT_ARCHIVE_LIMITS, ...options };
     if (input.length > limits.maxArchiveBytes) throw new ArchiveRefused("archive_limit");
     const bytes = input.slice();
-    const records = index(bytes, limits);
+    const [records, comment] = index(bytes, limits);
     const parts = new Map<string, Uint8Array>();
     for (const record of records) {
       const compressed = bytes.subarray(record.start, record.start + record.compressed);
@@ -38,15 +61,21 @@ export class SourceArchive {
       if (payload.length !== record.size || crc32(payload) !== record.crc) corrupt();
       parts.set(record.name, payload);
     }
-    return new SourceArchive(bytes, parts);
+    const entries: ArchiveEntry[] = records.map(({ name, size, crc, local, finish, central, centralLength, flags, method, localExtra }) =>
+      ({ name, size, crc, local, finish, central, centralLength, flags, method, localExtra }));
+    return new SourceArchive(bytes, parts, entries, comment);
   }
 
   names(): string[] { return [...this.parts.keys()]; }
   read(name: string): Uint8Array | null { return this.parts.get(name)?.slice() ?? null; }
   toBytes(): Uint8Array { return this.original.slice(); }
+  /** Verified member records in central-directory order. */
+  entries(): ArchiveEntry[] { return this.records.map((entry) => ({ ...entry })); }
+  /** The archive comment, verbatim. */
+  comment(): Uint8Array { return this.archiveComment.slice(); }
 }
 
-function index(bytes: Uint8Array, limits: Required<ArchiveLimits>): Part[] {
+function index(bytes: Uint8Array, limits: Required<ArchiveLimits>): [Part[], Uint8Array] {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const bounds = (at: number, size: number, end = bytes.length): void => {
     if (at < 0 || size < 0 || at + size > end || at + size > bytes.length) corrupt();
@@ -115,14 +144,16 @@ function index(bytes: Uint8Array, limits: Required<ArchiveLimits>): Part[] {
       }
       if (!found) corrupt();
     }
-    records.push({ name, method, crc, size, compressed, start }); regions.push([local, finish]);
+    records.push({ name, method, crc, size, compressed, start, local, finish, central: at,
+      centralLength: 46 + nameLength + extraLength + commentLength, flags, localExtra });
+    regions.push([local, finish]);
     at += 46 + nameLength + extraLength + commentLength;
   }
   if (at !== end) corrupt();
   regions.sort((a, b) => a[0] - b[0]);
   let previous = 0;
   for (const [start, finish] of regions) { if (start < previous) corrupt(); previous = finish; }
-  return records;
+  return [records, bytes.slice(end + 22, end + 22 + u16(end + 20))];
 }
 
 function partName(bytes: Uint8Array, flags: number): string {

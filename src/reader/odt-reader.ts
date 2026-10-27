@@ -31,7 +31,8 @@
  */
 
 import type { Block, Doc } from "../schema/types";
-import { unzipEntries } from "../zip/zip-reader";
+import { SourceArchive } from "../zip/source-archive";
+import { DOCUMENT, TEMPLATE, sourceKind, type SourceKind } from "../zip/office-template";
 import { isElement, parseDom, textContent, type DomElement } from "./odt/xml-dom";
 import { Structure, clamp, phpInt, phpTrim, type ListEntry } from "./structure";
 
@@ -55,6 +56,7 @@ export class OdtReader {
   private automaticStyles = new Map<string, DomElement>();
   private listStyles = new Map<string, DomElement>();
   private repeatedCells = 0;
+  private sourceKind: SourceKind = DOCUMENT;
 
   read(bytes: Uint8Array): Doc {
     const parts = this.parts(bytes);
@@ -75,13 +77,21 @@ export class OdtReader {
     if (title !== null && phpTrim(textContent(title)) !== "") doc.title = phpTrim(textContent(title));
 
     doc.blocks = body !== null ? this.blocks(body, 0) : [];
+    // An .ott reads exactly like its .odt twin, and says so.
+    if (this.sourceKind === TEMPLATE) doc.sourceKind = TEMPLATE;
     return doc as Doc;
   }
 
   // ─── Archive ──────────────────────────────────────────────────────────
 
   private parts(bytes: Uint8Array): Record<string, string> {
-    const entries = unzipEntries(bytes, ["content.xml", "styles.xml", "meta.xml"], MAX_PART_BYTES);
+    const source = SourceArchive.open(bytes, { maxPartBytes: MAX_PART_BYTES });
+    this.sourceKind = sourceKind(source);
+    const entries: Record<string, Uint8Array> = Object.create(null);
+    for (const name of ["content.xml", "styles.xml", "meta.xml"]) {
+      const data = source.read(name);
+      if (data !== null) entries[name] = data;
+    }
     if (entries["content.xml"] === undefined) throw new Error("ODT archive has no content.xml.");
 
     const parts: Record<string, string> = {};

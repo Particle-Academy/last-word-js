@@ -68,5 +68,8 @@
     "overrides": {
         "esbuild": "^0.28.1",
         "source-map-js": "^1.2.2"
+    },
+    "bin": {
+        "last-word": "dist/cli.js"
     }
 }
