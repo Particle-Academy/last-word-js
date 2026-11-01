@@ -2,6 +2,9 @@
  * Schema constants describing the Doc shape. Mirrors PHP `Schema\Schema`.
  */
 import { SUPPORTED_CHART_TYPES } from "../helpers/chart";
+import type { ResolvedPageMargins } from "./types";
+
+const isFiniteNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
 export const Schema = {
   VERSION: "0.1.0",
@@ -22,6 +25,53 @@ export const Schema = {
   BORDER_STYLES: ["single", "double", "dashed", "dotted", "none"] as const,
   PAGE_SIZES: ["letter", "legal", "a4"] as const,
   MAX_HEADING_LEVEL: 6,
+
+  /**
+   * Block types a footnote's `blocks` refuse, at any depth: a page break means
+   * nothing at the foot of a page, and a chart's parts are wired to the body.
+   * (`portable` is listed for parity with PHP; this engine has no portable
+   * block, so it is refused as an unknown type in any case.) A footnote inside
+   * a footnote is refused too (Word has no such thing), and so is a footnote in
+   * a header or footer, which Word cannot hold.
+   */
+  FOOTNOTE_REFUSED_TYPES: ["chart", "pageBreak", "portable"] as const,
+
+  /**
+   * What a page margin is when the document does not say, in points: one inch
+   * each side, and half an inch from the page edge to the header and to the
+   * footer. The reader OMITS a value equal to these (a page read back carries
+   * only what differs), so a viewer resolves the rest with `pageMargins()`.
+   */
+  PAGE_MARGIN_DEFAULT: 72,
+  PAGE_BAND_DISTANCE_DEFAULT: 36,
+
+  /**
+   * Every page margin and both header/footer distances, in points, defaults
+   * filled in -- what a paged viewer lays a page out from. `read()` omits a
+   * value equal to its default (`PAGE_MARGIN_DEFAULT`,
+   * `PAGE_BAND_DISTANCE_DEFAULT`), and omits `page` altogether when nothing
+   * differs, so this is the one place the defaults are applied. Mirrors PHP
+   * `Schema::pageMargins()`.
+   */
+  pageMargins(doc: unknown): ResolvedPageMargins {
+    const d = doc as { page?: unknown } | null;
+    const page = d !== null && typeof d === "object" && !Array.isArray(d) && d.page !== null && typeof d.page === "object" && !Array.isArray(d.page)
+      ? (d.page as Record<string, unknown>)
+      : {};
+    const m = page.margins !== null && typeof page.margins === "object" && !Array.isArray(page.margins)
+      ? (page.margins as Record<string, unknown>)
+      : {};
+    const value = (k: string, fallback: number): number => (isFiniteNumber(m[k]) ? (m[k] as number) : fallback);
+
+    return {
+      top: value("top", this.PAGE_MARGIN_DEFAULT),
+      right: value("right", this.PAGE_MARGIN_DEFAULT),
+      bottom: value("bottom", this.PAGE_MARGIN_DEFAULT),
+      left: value("left", this.PAGE_MARGIN_DEFAULT),
+      header: value("header", this.PAGE_BAND_DISTANCE_DEFAULT),
+      footer: value("footer", this.PAGE_BAND_DISTANCE_DEFAULT),
+    };
+  },
 
   docRequiredKeys(): string[] {
     return ["blocks"];
@@ -114,6 +164,7 @@ export const Schema = {
         },
         font: { type: "string", description: "Font family name." },
         letterSpacing: { type: "number", description: "Tracking in points; may be negative." },
+        footnote: { $ref: "#/definitions/footnote" },
       },
     };
 
@@ -132,7 +183,7 @@ export const Schema = {
           properties: {
             size: { type: "string", enum: [...this.PAGE_SIZES] },
             orientation: { type: "string", enum: ["portrait", "landscape"] },
-            margins: { $ref: "#/definitions/boxSides" },
+            margins: { $ref: "#/definitions/pageMargins" },
             header: { $ref: "#/definitions/band", description: "A running header on every page." },
             footer: {
               $ref: "#/definitions/band",
@@ -153,6 +204,38 @@ export const Schema = {
         boxBorders,
         tableBorders,
         boxSides,
+        pageMargins: {
+          type: "object",
+          additionalProperties: false,
+          description:
+            "Page margins in points, 72 (one inch) each side by default, and the header and footer DISTANCES: how far the header sits from the top edge of the page and the footer from the bottom edge, 36 by default. Word moves the body down (or up) when a header (or footer) is taller than the margin leaves room for. Anything omitted is the default.",
+          properties: {
+            top: points,
+            right: points,
+            bottom: points,
+            left: points,
+            header: { type: "number", minimum: 0, description: "Points from the top edge of the page to the top of the header. 36 by default." },
+            footer: { type: "number", minimum: 0, description: "Points from the bottom edge of the page to the bottom of the footer. 36 by default." },
+          },
+        },
+        footnote: {
+          type: "object",
+          required: ["blocks"],
+          additionalProperties: false,
+          description:
+            'A footnote, carried by a run whose text is "" and which sits where the reference mark goes: {"text": "", "footnote": {"blocks": [{"type": "paragraph", "runs": [{"text": "Audited figures, FY2026."}]}]}}. Word numbers the marks 1, 2, 3 in document order and sets each footnote at the foot of the page that holds its mark. The blocks are the body vocabulary less chart and pageBreak, with no footnote inside a footnote. Not in a header or footer.',
+          properties: {
+            blocks: {
+              type: "array",
+              items: {
+                allOf: [
+                  { $ref: "#/definitions/block" },
+                  { not: { properties: { type: { enum: ["chart", "pageBreak"] } }, required: ["type"] } },
+                ],
+              },
+            },
+          },
+        },
         band,
         listItem: {
           type: "object",

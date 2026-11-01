@@ -78,7 +78,22 @@ export interface Run {
   font?: string;
   /** Tracking in points; may be negative. Zero is the default and emits nothing. */
   letterSpacing?: number;
+  /**
+   * A footnote. The run carrying one has `text: ""` and sits where the
+   * reference mark goes; Word numbers the marks 1, 2, 3 in document order, so
+   * the model carries no number. Not in a header or footer, and never inside
+   * another footnote.
+   */
+  footnote?: Footnote;
   [key: string]: unknown;
+}
+
+/**
+ * A footnote's content: the body's block vocabulary less `chart` and
+ * `pageBreak`, at any depth.
+ */
+export interface Footnote {
+  blocks: Block[];
 }
 
 /**
@@ -254,11 +269,32 @@ export type Block =
   | PageBreakBlock
   | HrBlock;
 
+/**
+ * Page margins in points, 72 (one inch) a side by default, and the header and
+ * footer DISTANCES: points from the top edge of the page to the header and from
+ * the bottom edge to the footer, 36 by default. `read()` omits any value equal
+ * to its default; resolve them with `Schema.pageMargins()`.
+ */
+export interface PageMargins extends BoxSides {
+  header?: number;
+  footer?: number;
+}
+
+/** Every margin and both distances, defaults filled in: `Schema.pageMargins()`. */
+export interface ResolvedPageMargins {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+  header: number;
+  footer: number;
+}
+
 /** Section geometry. Margins are POINTS. */
 export interface Page {
   size?: PageSize;
   orientation?: Orientation;
-  margins?: BoxSides;
+  margins?: PageMargins;
 }
 
 export interface Doc {

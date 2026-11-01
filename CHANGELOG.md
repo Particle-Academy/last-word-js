@@ -7,7 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.11.0] - 2026-10-27
+## [0.12.0] - 2026-11-01
+
+**What you must do: nothing, unless you want footnotes or the header/footer
+distances.** No existing document writes or reads differently: a document
+without a footnote is byte-identical, and `read()` output is unchanged for every
+file that has no footnotes and default header/footer distances. Mirrors PHP
+`particle-academy/last-word` 0.15.0.
+
+### Added
+
+- **Footnotes** (MOIC, 2026-11-01). A footnote is a RUN placed where the mark
+  goes: `{"text": "", "footnote": {"blocks": [...]}}`, its blocks the body's
+  vocabulary less `chart` and `pageBreak`. Word numbers the marks in document
+  order; the model carries no number. Allowed in headings, paragraphs, list
+  items, table cells and quotes; refused in a header or footer and inside
+  another footnote (Word has neither). `validateAndRepair` sets a missing `text`
+  to `""`, moves text typed on the mark into a run before it, wraps a string or a
+  bare list of blocks, and drops a misplaced footnote with a note.
+  - `toBytes` writes `word/footnotes.xml` with the separator (`w:id` -1) and
+    continuation separator (0) Word requires, `w:footnotePr` naming them in
+    `settings.xml`, a `FootnoteReference`-styled `w:footnoteReference` run, the
+    relationship and content type, the `FootnoteText` / `FootnoteReference`
+    styles (only when a footnote exists; a template's own definitions win), and
+    `word/_rels/footnotes.xml.rels` for a footnote's links and images.
+    LibreOffice renders the notes at the foot of the page, under the separator
+    rule and above the footer, and its own `.docx` export of the file reads back
+    with every footnote. The footnotes part, its relationships and settings are
+    byte-identical to PHP's (pinned by the parity suite).
+  - `read()` returns the same run for a `.docx` footnote from any producer: any
+    ids, Word's separators and continuation notices skipped, the space after a
+    footnote's own number stripped, a run holding text and a reference split in
+    two. A reference whose footnote is missing reads as nothing. A footnotes part
+    declaring a DOCTYPE is not read. `mergeRuns()` never merges or drops a
+    footnote run.
+  - Agent guide: one idiom and example (the guide's bytes and hash changed; the
+    PHP and Python packages carry the same bytes).
+- **Header and footer distances: `page.margins.header` / `page.margins.footer`**,
+  points from the page edge to the header and to the footer (`w:pgMar` `header` /
+  `footer`; 36 by default). Written and read symmetrically.
+- **`Schema.pageMargins(doc)`**: all four margins and both distances, defaults
+  filled in, for a paged viewer. `Schema.PAGE_MARGIN_DEFAULT` (72) and
+  `Schema.PAGE_BAND_DISTANCE_DEFAULT` (36) name the defaults, and
+  `Schema.FOOTNOTE_REFUSED_TYPES` the block types a footnote refuses. Types:
+  `Footnote`, `PageMargins`, `ResolvedPageMargins`; `Run.footnote`.
+
+### Notes
+
+- **The margin rule is unchanged, and now documented.** `read()` omits any margin
+  equal to its default (72pt a side, now also 36pt a distance) and omits `page`
+  when nothing differs, so "no bottom margin" in a read document means one inch,
+  not none. Emitting every side would have changed the read output of every
+  existing document and fixture. **Consumer action for a viewer:** resolve with
+  `Schema.pageMargins()` (or the same defaults in your language) instead of
+  treating an absent margin as zero.
+- **Not covered yet:** the `.doc`, `.odt` and `.rtf` readers still skip footnotes
+  (as they always have; this release did not change them). Markdown export does
+  not carry footnotes: the mark vanishes there and the footnote's text is not
+  exported. (This package has no HTML, plain-text or portable export; in PHP
+  those do not carry footnotes either.)
+- **Where this engine differs from PHP 0.15.0, because of what it does not have
+  yet, not because of footnotes:** it writes no `{blocks}` header or footer (PHP
+  0.14.0, last-word#6), so a footnote can never reach one here; validation still
+  refuses a footnote in a `page.header.blocks` / `page.footer.blocks` and
+  `validateAndRepair` drops it, so an agent is told the same thing by both
+  engines. And a template's section (`templateParts`, PHP 0.13.0) is not taken,
+  so there is no template distance for the document's to override. Validation
+  paths keep this package's JSON-Pointer form (`/blocks/0/runs/0/footnote`).
+- `@particle-academy/fancy-conformance` (devDependency) moves to `^0.40.0`:
+  `last-word/docx-constructs` rows 0045-0053 pin the footnote and page-geometry
+  contract for all three engines, with the new `footnotesPart` extractor. Dev
+  only; nothing at runtime depends on it.
+
 
 ### Added
 

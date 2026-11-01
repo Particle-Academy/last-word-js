@@ -47,6 +47,64 @@ function phpAvailable(): boolean {
 
 const META = { creator: "Parity", created: "2024-01-01T00:00:00Z", modified: "2024-01-01T00:00:00Z" };
 
+const RED_PNG =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR42mP4z8AARAwQCgAf7gP9Y167WwAAAABJRU5ErkJggg==";
+
+const note = (text: string): unknown => ({ text: "", footnote: { blocks: [{ type: "paragraph", runs: [{ text }] }] } });
+
+const FOOTNOTE_DOC = {
+  title: "Footnotes",
+  metadata: META,
+  page: { margins: { bottom: 54, header: 18, footer: 27 }, footer: { right: "Page {page} of {pages}" } },
+  blocks: [
+    { type: "heading", level: 1, runs: [{ text: "Results" }, note("Unaudited.")] },
+    { type: "paragraph", runs: [{ text: "Revenue grew " }, { text: "18%", bold: true }, note("Against FY2025."), { text: " on the prior year." }] },
+    { type: "paragraph", runs: [{ text: "Twice" }, note("Ibid."), note("Ibid.")] },
+    { type: "paragraph", runs: [note("Only a mark.")] },
+    {
+      type: "paragraph",
+      runs: [
+        { text: "Rich" },
+        {
+          text: "",
+          footnote: {
+            blocks: [
+              { type: "paragraph", align: "justify", runs: [{ text: "Sources: ", bold: true }, { text: "the ledger", italic: true }] },
+              { type: "image", src: RED_PNG, alt: "seal" },
+              { type: "quote", blocks: [{ type: "paragraph", runs: [{ text: "Quoted in a note" }] }] },
+              { type: "paragraph", runs: [{ text: " leading space kept" }] },
+            ],
+          },
+        },
+      ],
+    },
+    { type: "paragraph", runs: [{ text: "Code" }, { text: "", footnote: { blocks: [{ type: "code", language: "sql", text: "select 1;" }] } }] },
+    { type: "image", src: RED_PNG, alt: "body image after a note image" },
+  ],
+};
+
+/** A footnote holding what the WRITERS still build differently (link, list, table): each reader must still read the other's file. */
+const FOOTNOTE_READ_DOC = {
+  blocks: [
+    {
+      type: "paragraph",
+      runs: [
+        { text: "Rich" },
+        {
+          text: "",
+          footnote: {
+            blocks: [
+              { type: "paragraph", runs: [{ text: "Sources: ", bold: true }, { text: "the ledger", link: "https://example.com/ledger" }] },
+              { type: "list", ordered: true, items: [{ runs: [{ text: "Ledger" }] }, { runs: [{ text: "Board pack" }] }] },
+              { type: "table", rows: [{ cells: [{ blocks: [{ type: "paragraph", runs: [{ text: "FY26" }] }] }] }] },
+            ],
+          },
+        },
+      ],
+    },
+  ],
+};
+
 const DOCS: Record<string, unknown> = {
   /** The floor: if this diverges, nothing below is worth reading. */
   minimal: {
@@ -163,6 +221,14 @@ const DOCS: Record<string, unknown> = {
     },
     blocks: [{ type: "paragraph", runs: [{ text: "Body" }, { text: "link", link: "https://example.com" }] }],
   },
+
+  /**
+   * Footnotes (PHP 0.15.0) and the header / footer distances. Body and notes
+   * hold only constructs both engines already write identically (no list, table
+   * or hyperlink, whose divergences are in the ledger below), so EVERY part of
+   * this document must match -- document.xml included; see the dedicated test.
+   */
+  footnotes: FOOTNOTE_DOC,
 };
 
 /**
@@ -388,6 +454,28 @@ describe.skipIf(!HAS_PHP)("cross-engine writer parity (PHP vs TS)", () => {
     expect(actuallyDiffering.sort(), "KNOWN_DIVERGENT_PARTS no longer matches reality").toEqual(
       Object.keys(KNOWN_DIVERGENT_PARTS).sort(),
     );
+  });
+
+  it("emits every part of a footnoted document exactly as PHP does, the body included", () => {
+    const { phpParts, tsParts } = writeBoth("footnotes-strict", FOOTNOTE_DOC);
+    const dec = new TextDecoder();
+
+    expect(Object.keys(phpParts)).toContain("word/footnotes.xml");
+    expect(Object.keys(phpParts)).toContain("word/_rels/footnotes.xml.rels");
+    expect(Object.keys(phpParts)).toContain("word/settings.xml");
+    for (const part of ["word/document.xml", "word/footnotes.xml", "word/_rels/footnotes.xml.rels", "word/settings.xml", "word/_rels/document.xml.rels"]) {
+      expect(dec.decode(tsParts[part]!), part).toBe(dec.decode(phpParts[part]!));
+    }
+  });
+
+  it("reads PHP's footnotes back to the same document, links, lists and tables included", () => {
+    const docFile = join(dir, "footnotes-read.json");
+    const phpOut = join(dir, "footnotes-read.php.docx");
+    writeFileSync(docFile, JSON.stringify(FOOTNOTE_READ_DOC));
+    php([PHP_SCRIPT, docFile, phpOut]);
+
+    expect(Agent.read(new Uint8Array(readFileSync(phpOut)))).toStrictEqual(FOOTNOTE_READ_DOC);
+    expect(Agent.read(new Uint8Array(readFileSync(phpOut)))).toStrictEqual(Agent.read(Agent.toBytes(FOOTNOTE_READ_DOC)));
   });
 
   it("compared something — the loop is not empty", () => {

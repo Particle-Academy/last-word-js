@@ -1,11 +1,19 @@
 import { clone, isNumeric, isPlainObject } from "../util";
 import { Schema } from "./schema";
 import type { ValidationError } from "./types";
-import { validateChart } from "./validator";
+import { hasFootnote, validateChart } from "./validator";
 import { chartLabel } from "../helpers/chart";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
+
+/** A scalar as PHP's `(string)` cast gives it (true "1", false ""); null for anything else. */
+function scalarText(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : null;
+  if (typeof value === "boolean") return value ? "1" : "";
+  return null;
+}
 
 /** `{chartType, title, categories, series: [{name, values, color}]}` as the chart block it stands for. */
 function chartFromShorthand(block: Any): Record<string, unknown> {
@@ -62,14 +70,35 @@ export class Repairer {
   /** Errors describing content the last `repair()` call had to drop. */
   notes: ValidationError[] = [];
 
+  /** 'body', 'band' or 'footnote': where a footnote run is being repaired, and so whether it may stay. */
+  private context: "body" | "band" | "footnote" = "body";
+
   repair(docInput: Any): Record<string, unknown> {
     this.notes = [];
+    this.context = "body";
     const doc: Any = isPlainObject(docInput) ? clone(docInput) : {};
 
     if (doc.title !== undefined && typeof doc.title !== "string") {
       doc.title = String(doc.title);
     }
     doc.blocks = this.repairBlocks(doc.blocks ?? [], "/blocks");
+
+    // A `{blocks}` header or footer (PHP 0.14.0; this engine does not write one)
+    // is repaired in the band's context, so a footnote in it is dropped with a
+    // note, as PHP does: a header or footer cannot hold one.
+    if (isPlainObject(doc.page)) {
+      for (const kind of ["header", "footer"] as const) {
+        const band = doc.page[kind];
+        if (isPlainObject(band) && Array.isArray((band as Any).blocks)) {
+          this.context = "band";
+          try {
+            (band as Any).blocks = this.repairBlocks((band as Any).blocks, `/page/${kind}/blocks`);
+          } finally {
+            this.context = "body";
+          }
+        }
+      }
+    }
 
     return doc;
   }
@@ -111,11 +140,11 @@ export class Repairer {
         if (level < 1) level = 1;
         if (level > Schema.MAX_HEADING_LEVEL) level = Schema.MAX_HEADING_LEVEL;
         block.level = level;
-        block.runs = this.repairRuns(block.runs);
+        block.runs = this.repairRuns(block.runs, `${path}/runs`);
         break;
       }
       case "paragraph":
-        block.runs = this.repairRuns(block.runs);
+        block.runs = this.repairRuns(block.runs, `${path}/runs`);
         if (block.align !== undefined && !(Schema.ALIGNMENTS as readonly string[]).includes(block.align)) {
           delete block.align;
         }
@@ -123,7 +152,7 @@ export class Repairer {
 
       case "list":
         if (block.ordered !== undefined) block.ordered = Boolean(block.ordered);
-        block.items = this.repairListItems(block.items);
+        block.items = this.repairListItems(block.items, `${path}/items`);
         break;
 
       case "table":
@@ -212,17 +241,21 @@ export class Repairer {
     return block;
   }
 
-  private repairRuns(runs: Any): Record<string, unknown>[] {
+  private repairRuns(runs: Any, path: string): Record<string, unknown>[] {
     // A bare string coerces to a single run.
     if (typeof runs === "string") return [{ text: runs }];
     if (!Array.isArray(runs)) return [];
     const out: Record<string, unknown>[] = [];
-    for (const run of runs) {
+    for (const [i, run] of runs.entries()) {
       if (typeof run === "string") {
         out.push({ text: run });
         continue;
       }
       if (!isPlainObject(run)) continue;
+      if (hasFootnote(run)) {
+        out.push(...this.repairFootnoteRun(run, `${path}/${i}`));
+        continue;
+      }
       if (typeof run.text !== "string") run.text = String(run.text ?? "");
       for (const flag of ["bold", "italic", "underline", "strike", "code"] as const) {
         if (run[flag] !== undefined && typeof run[flag] !== "boolean") run[flag] = Boolean(run[flag]);
@@ -238,18 +271,106 @@ export class Repairer {
     return out;
   }
 
-  private repairListItems(items: Any): Record<string, unknown>[] {
+  /**
+   * A footnote run, repaired into what it should have been: text the agent
+   * typed on the mark moves to a run of its own before it (losing nothing), a
+   * missing `text` becomes "", a bare string or a bare list of blocks is
+   * wrapped, and a footnote where Word cannot hold one (a header or footer,
+   * another footnote) is dropped with a note. Mirrors PHP
+   * `Repairer::repairFootnoteRun()`.
+   */
+  private repairFootnoteRun(input: Any, path: string): Record<string, unknown>[] {
+    const { footnote, ...run } = input as Any;
+    let note: Any = footnote;
+    const out: Record<string, unknown>[] = [];
+    const typed = scalarText(run.text);
+    if (typed !== null && typed !== "") {
+      run.text = typed;
+      out.push(run);
+      this.notes.push({ path: `${path}/text`, message: "Moved text typed on a footnote mark into a run of its own before it." });
+    }
+
+    if (this.context !== "body") {
+      this.notes.push({
+        path: `${path}/footnote`,
+        message: this.context === "band" ? "Dropped a footnote: a header or footer cannot hold one." : "Dropped a footnote inside a footnote.",
+      });
+      return out;
+    }
+
+    if (typeof note === "string" && note !== "") {
+      note = { blocks: [{ type: "paragraph", runs: [{ text: note }] }] };
+      this.notes.push({ path: `${path}/footnote`, message: "Coerced a string footnote to {blocks: [paragraph]}." });
+    } else if (Array.isArray(note) && note.length > 0) {
+      note = { blocks: note };
+      this.notes.push({ path: `${path}/footnote`, message: "Coerced a list of blocks to {blocks}." });
+    }
+    let blocks: Any = isPlainObject(note) ? (note as Any).blocks : null;
+    if (typeof blocks === "string" && blocks !== "") {
+      blocks = [{ type: "paragraph", runs: [{ text: blocks }] }];
+    }
+    if (!Array.isArray(blocks)) {
+      this.notes.push({ path: `${path}/footnote`, message: "Dropped a footnote without blocks." });
+      return out;
+    }
+
+    const at = `${path}/footnote/blocks`;
+    this.context = "footnote";
+    try {
+      blocks = this.dropRefusedInFootnote(this.repairBlocks(blocks, at), at);
+    } finally {
+      this.context = "body";
+    }
+    if (blocks.length === 0) {
+      this.notes.push({ path: `${path}/footnote`, message: "Dropped a footnote with no blocks left." });
+      return out;
+    }
+    if (!Object.prototype.hasOwnProperty.call(run, "text")) {
+      this.notes.push({ path: `${path}/text`, message: 'Defaulted a footnote run\'s text to "".' });
+    }
+    out.push({ text: "", footnote: { blocks } });
+    return out;
+  }
+
+  /** A footnote's blocks without what a footnote cannot hold (`Schema.FOOTNOTE_REFUSED_TYPES`), at any depth, each drop noted. */
+  private dropRefusedInFootnote(blocks: Record<string, unknown>[], path: string): Record<string, unknown>[] {
+    const out: Record<string, unknown>[] = [];
+    blocks.forEach((block: Any, i: number) => {
+      const at = `${path}/${i}`;
+      const type = block?.type;
+      if ((Schema.FOOTNOTE_REFUSED_TYPES as readonly string[]).includes(type)) {
+        this.notes.push({ path: at, message: `Dropped a ${type} block: a footnote cannot hold one.` });
+        return;
+      }
+      if (type === "quote" && Array.isArray(block.blocks)) {
+        block.blocks = this.dropRefusedInFootnote(block.blocks, `${at}/blocks`);
+      }
+      if (type === "table" && Array.isArray(block.rows)) {
+        block.rows.forEach((row: Any, r: number) => {
+          (Array.isArray(row?.cells) ? row.cells : []).forEach((cell: Any, c: number) => {
+            if (Array.isArray(cell?.blocks)) {
+              cell.blocks = this.dropRefusedInFootnote(cell.blocks, `${at}/rows/${r}/cells/${c}/blocks`);
+            }
+          });
+        });
+      }
+      out.push(block);
+    });
+    return out;
+  }
+
+  private repairListItems(items: Any, path: string): Record<string, unknown>[] {
     if (!Array.isArray(items)) return [];
     const out: Record<string, unknown>[] = [];
-    for (const item of items) {
+    for (const [i, item] of items.entries()) {
       if (typeof item === "string") {
         out.push({ runs: [{ text: item }] });
         continue;
       }
       if (!isPlainObject(item)) continue;
-      item.runs = this.repairRuns(item.runs);
+      item.runs = this.repairRuns(item.runs, `${path}/${i}/runs`);
       if (item.children !== undefined) {
-        const children = this.repairListItems(item.children);
+        const children = this.repairListItems(item.children, `${path}/${i}/children`);
         if (children.length > 0) item.children = children;
         else delete item.children;
       }

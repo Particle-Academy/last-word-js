@@ -14,7 +14,7 @@ import { parseXml, el, els, at, type XmlNode } from "../src/reader/xml";
  * in that engine rather than quietly becoming that engine's behaviour. Adding a
  * construct means adding a row there, once.
  *
- * What lives here is only the six extractors: how to get from `toBytes(doc)` to
+ * What lives here is only the extractors: how to get from `toBytes(doc)` to
  * the value a row compares. They are deliberately thin — a normaliser clever
  * enough to paper over a difference is a normaliser that stops the suite
  * finding one.
@@ -62,6 +62,51 @@ function runText(run: XmlNode): string {
   return collect(run, "t").map((t) => t.text).join("");
 }
 
+/** Every part of a written document, by name, as text. */
+function writtenParts(doc: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, bytes] of Object.entries(unzipSync(Agent.toBytes(doc)))) out[name] = new TextDecoder().decode(bytes);
+  return out;
+}
+
+function partRoot(xml: string | undefined): XmlNode | null {
+  return xml === undefined ? null : parseXml(xml);
+}
+
+/** The `footnotesPart` projection, as the manifest defines it. */
+function footnotesPart(doc: unknown): unknown {
+  const parts = writtenParts(doc);
+
+  let contentType: string | null = null;
+  for (const o of collect(partRoot(parts["[Content_Types].xml"]), "Override")) {
+    if (at(o, "PartName") === "/word/footnotes.xml") contentType = at(o, "ContentType") ?? null;
+  }
+  let relationship: string | null = null;
+  for (const rel of collect(partRoot(parts["word/_rels/document.xml.rels"]), "Relationship")) {
+    if ((at(rel, "Type") ?? "").endsWith("/footnotes")) relationship = at(rel, "Target") ?? null;
+  }
+  const settings = partRoot(parts["word/settings.xml"]);
+  const footnotePr = settings ? el(settings, "footnotePr") : undefined;
+
+  const root = partRoot(parts["word/footnotes.xml"]);
+  const footnotes = (root?.children ?? [])
+    .filter((node) => node.name === "footnote")
+    .map((node) => ({
+      id: at(node, "id") ?? "",
+      type: at(node, "type") ?? null,
+      text: runText(node),
+      content: normProps(node),
+    }));
+
+  return {
+    contentType,
+    relationship,
+    footnotePr: footnotePr === undefined ? null : normProps(footnotePr),
+    references: collect(documentXml(doc), "footnoteReference").map((r) => at(r, "id") ?? ""),
+    footnotes,
+  };
+}
+
 const EXTRACTORS: Record<string, (doc: unknown) => unknown> = {
   runProps: (doc) =>
     collect(documentXml(doc), "r").map((r) => ({ text: runText(r), rPr: normProps(el(r, "rPr")) })),
@@ -77,6 +122,8 @@ const EXTRACTORS: Record<string, (doc: unknown) => unknown> = {
   cellProps: (doc) => collect(documentXml(doc), "tc").map((tc) => normProps(el(tc, "tcPr"))),
 
   sectionProps: (doc) => normProps(el(el(documentXml(doc), "body"), "sectPr")),
+
+  footnotesPart: (doc) => footnotesPart(doc),
 
   readBack: (doc) => Agent.read(Agent.toBytes(doc)),
 

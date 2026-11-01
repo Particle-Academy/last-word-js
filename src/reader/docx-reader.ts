@@ -76,12 +76,31 @@ export class DocxReader {
   /** The section's text column in twips. */
   private contentWidth = 9360;
 
+  /**
+   * The document's footnotes, by `w:id`, from the part its `footnotes`
+   * relationship names: the `w:footnote` elements of its own (separators and
+   * continuation notices are not footnotes).
+   */
+  private footnoteNodes = new Map<string, XmlNode>();
+
+  /** The footnotes part's OWN relationships, which resolve its links and images. */
+  private footnoteRels: Record<string, RelInfo> = {};
+
+  /** A footnote's blocks once read, by id: a footnote referenced twice is read once. */
+  private footnoteCache = new Map<string, Block[]>();
+
+  /** True while a footnote's blocks are read: a reference inside one is ignored. */
+  private inFootnote = false;
+
   read(bytes: Uint8Array): Doc {
     const source = SourceArchive.open(bytes);
     const kind = sourceKind(source);
     this.parts = Object.create(null) as Record<string, Uint8Array>;
     for (const name of source.names()) this.parts[name] = source.read(name)!;
     this.rels = this.loadRels("word/_rels/document.xml.rels");
+    this.inFootnote = false;
+    this.footnoteCache = new Map();
+    this.loadFootnotes();
     this.numOrdered = this.loadNumbering();
 
     const docXml = this.partText("word/document.xml");
@@ -129,9 +148,14 @@ export class DocxReader {
 
     const pgMar = el(sectPr, "pgMar");
     const margins: Record<string, number> = {};
-    for (const side of BOX_EDGES) {
+    // Each value only when it differs from what the writer puts there unasked
+    // -- 1440 twips a side, 720 to the header and the footer -- so a document
+    // read before the distances were read reads the same. Schema.pageMargins()
+    // fills the defaults back in for a viewer.
+    for (const side of [...BOX_EDGES, "header", "footer"] as const) {
       const value = numAttr(pgMar, side);
-      if (value !== null && value !== 1440) margins[side] = points(value);
+      const fallback = side === "header" || side === "footer" ? 720 : 1440;
+      if (value !== null && value !== fallback) margins[side] = points(value);
     }
     if (Object.keys(margins).length > 0) out.margins = margins;
 
@@ -266,6 +290,70 @@ export class DocxReader {
       out[id] = { target, external: at(rel, "TargetMode") === "External" };
     }
     return out;
+  }
+
+  /**
+   * The footnotes part the document's `footnotes` relationship names, and its
+   * own relationships. Sized by the archive's own limits, as document.xml is; a
+   * part declaring a DOCTYPE is not read, and its references then read as
+   * nothing. Mirrors PHP `DocxReader::loadFootnotes()`.
+   */
+  private loadFootnotes(): void {
+    this.footnoteNodes = new Map();
+    this.footnoteRels = {};
+    const relsXml = this.partText("word/_rels/document.xml.rels");
+    const target = relsXml !== null ? relTargetOfType(relsXml, "footnotes") : null;
+    if (target === null) return;
+    const name = target.startsWith("/")
+      ? target.replace(/^\/+/, "")
+      : "word/" + target.split("\\").join("/").replace(/^\/+/, "");
+    const xml = this.partText(name);
+    if (xml === null || /<!DOCTYPE/i.test(xml)) return;
+    const root = parseXml(xml);
+    if (!root) return;
+    for (const node of root.children) {
+      const type = at(node, "type");
+      if (node.name === "footnote" && (type === undefined || type === "normal")) {
+        const id = at(node, "id");
+        if (id !== undefined && !this.footnoteNodes.has(id)) this.footnoteNodes.set(id, node);
+      }
+    }
+
+    const relsName = `word/_rels/${name.split("/").pop()}.rels`;
+    const partRels = this.partText(relsName);
+    this.footnoteRels = partRels !== null && !/<!DOCTYPE/i.test(partRels) ? this.loadRels(relsName) : {};
+  }
+
+  /**
+   * The model run for a `w:footnoteReference`: `{text: "", footnote: {blocks}}`,
+   * its blocks read by the body's own block reader against the footnotes
+   * part's relationships. Null -- nothing in the model -- for a reference inside
+   * another footnote (Word allows none), for an id with no footnote, and for a
+   * footnote with no content. (A header or footer is read as a band here,
+   * which never reaches this.)
+   */
+  private footnoteRun(id: string): Run | null {
+    const node = this.footnoteNodes.get(id);
+    if (this.inFootnote || node === undefined) return null;
+    if (!this.footnoteCache.has(id)) {
+      const rels = this.rels;
+      this.rels = this.footnoteRels;
+      this.inFootnote = true;
+      try {
+        // Without the content-free paragraphs, as PHP reads every container:
+        // the writer puts the mark in a paragraph of its own before a note that
+        // opens with a table, and closes one that ends with a table with an
+        // empty one, and neither is the author's.
+        this.footnoteCache.set(id, this.walkBody(node.children, {}).filter((block) => !isEmptyParagraph(block)));
+      } finally {
+        this.rels = rels;
+        this.inFootnote = false;
+      }
+    }
+    const blocks = this.footnoteCache.get(id)!;
+    // A copy each time: a footnote referenced twice must not be one object
+    // shared between two runs of the model.
+    return blocks.length === 0 ? null : { text: "", footnote: { blocks: JSON.parse(JSON.stringify(blocks)) as Block[] } };
   }
 
   private loadNumbering(): Record<string, boolean> {
@@ -507,29 +595,36 @@ export class DocxReader {
 
   // ── Runs ─────────────────────────────────────────────────────────────────
 
-  private parseRuns(container: XmlNode, link: string | undefined): Run[] {
+  /**
+   * The runs of a paragraph-like container. `state` is the paragraph's: it
+   * carries "the footnote's own mark was just read" from one w:r to the next,
+   * so the space after a footnote's number is stripped once.
+   */
+  private parseRuns(container: XmlNode, link: string | undefined, state: RunState = { afterMark: false }): Run[] {
     const runs: Run[] = [];
     for (const child of container.children) {
       switch (child.name) {
         case "r":
-          runs.push(...this.runFrom(child, link));
+          // A list: one w:r holding text AND a footnote reference (another
+          // producer's spelling) is two runs in the model.
+          runs.push(...this.runFrom(child, link, state));
           break;
         case "hyperlink": {
           const rid = at(child, "id");
           const rel = rid ? this.rels[rid] : undefined;
           const anchor = at(child, "anchor");
           const url = rel?.external ? rel.target : anchor ? `#${anchor}` : undefined;
-          runs.push(...this.parseRuns(child, url ?? link));
+          runs.push(...this.parseRuns(child, url ?? link, state));
           break;
         }
         case "sdt": {
           const content = el(child, "sdtContent");
-          if (content) runs.push(...this.parseRuns(content, link));
+          if (content) runs.push(...this.parseRuns(content, link, state));
           break;
         }
         case "ins":
         case "smartTag":
-          runs.push(...this.parseRuns(child, link));
+          runs.push(...this.parseRuns(child, link, state));
           break;
         default:
           break;
@@ -538,17 +633,53 @@ export class DocxReader {
     return mergeRuns(runs);
   }
 
-  private runFrom(r: XmlNode, link: string | undefined): Run[] {
-    const rPr = el(r, "rPr");
+  /**
+   * One w:r as model runs: usually one, none when it carries no text, and a
+   * footnote run where it holds a `w:footnoteReference` (with the text either
+   * side of it as runs of their own). Mirrors PHP `parseRun()`.
+   */
+  private runFrom(r: XmlNode, link: string | undefined, state: RunState = { afterMark: false }): Run[] {
+    const out: Run[] = [];
     let text = "";
     for (const child of r.children) {
-      if (child.name === "t") text += child.text;
-      else if (child.name === "br" && at(child, "type") !== "page") text += "\n";
+      if (child.name === "t") {
+        let piece = child.text;
+        // The space Word puts between a footnote's own mark and its text is
+        // the mark's, not the text's.
+        if (state.afterMark && piece !== "") {
+          if (piece[0] === " ") piece = piece.slice(1);
+          state.afterMark = false;
+        }
+        text += piece;
+      } else if (child.name === "footnoteRef") {
+        // A footnote's own number, inside footnotes.xml: Word draws it.
+        state.afterMark = true;
+      } else if (child.name === "footnoteReference") {
+        const note = this.footnoteRun(at(child, "id") ?? "");
+        if (note !== null) {
+          if (text !== "") {
+            out.push(this.runWith(text, r, link));
+            text = "";
+          }
+          out.push(note);
+        }
+      } else if (child.name === "br" && at(child, "type") !== "page") text += "\n";
       else if (child.name === "cr") text += "\n";
-      else if (child.name === "tab") text += "\t";
+      else if (child.name === "tab") {
+        if (state.afterMark) {
+          state.afterMark = false; // a tab after the mark is the mark's too
+          continue;
+        }
+        text += "\t";
+      }
     }
-    if (text === "") return [];
+    if (text !== "") out.push(this.runWith(text, r, link));
+    return out;
+  }
 
+  /** A model run from text and its w:r's run properties. */
+  private runWith(text: string, r: XmlNode, link: string | undefined): Run {
+    const rPr = el(r, "rPr");
     const run: Run = { text };
     if (onFlag(el(rPr, "b"))) run.bold = true;
     if (onFlag(el(rPr, "i"))) run.italic = true;
@@ -589,7 +720,7 @@ export class DocxReader {
       if (named && named !== "none" && HIGHLIGHT_NAMES[named]) run.highlight = HIGHLIGHT_NAMES[named];
     }
 
-    return [run];
+    return run;
   }
 
   // ── Lists ────────────────────────────────────────────────────────────────
@@ -981,15 +1112,44 @@ function findFirst(node: XmlNode | undefined, name: string): XmlNode | undefined
 export function mergeRuns(runs: Run[]): Run[] {
   const out: Run[] = [];
   for (const run of runs) {
-    if (run.text === "") continue;
+    // A footnote run's text is always "", and it is never merged: two
+    // identical footnotes in a row are two footnotes.
+    const isNote = isNoteRun(run);
+    if (run.text === "" && !isNote) continue;
     const prev = out[out.length - 1];
-    if (prev && sameProps(prev, run)) {
+    if (prev && !isNote && !isNoteRun(prev) && sameProps(prev, run)) {
       prev.text += run.text;
     } else {
       out.push({ ...run });
     }
   }
   return out;
+}
+
+function isNoteRun(run: Run): boolean {
+  return Object.prototype.hasOwnProperty.call(run, "footnote") && run.footnote !== undefined;
+}
+
+/** What one paragraph's runs carry from one w:r to the next. */
+interface RunState {
+  /** A footnote's own mark was just read: the space or tab after it is the mark's. */
+  afterMark: boolean;
+}
+
+/** The target of the first non-external relationship whose type ends `/${type}`, or null. Mirrors PHP. */
+function relTargetOfType(relsXml: string, type: string): string | null {
+  const root = parseXml(relsXml);
+  for (const rel of root?.children ?? []) {
+    if (
+      rel.name === "Relationship" &&
+      (at(rel, "Type") ?? "").endsWith(`/${type}`) &&
+      (at(rel, "TargetMode") ?? "").toLowerCase() !== "external" &&
+      (at(rel, "Target") ?? "") !== ""
+    ) {
+      return at(rel, "Target")!;
+    }
+  }
+  return null;
 }
 
 function sameProps(a: Run, b: Run): boolean {

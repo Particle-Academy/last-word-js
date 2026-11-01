@@ -215,9 +215,60 @@ function checkHexPresent(value: Any, path: string, label: string): ValidationErr
   return value === null ? [] : checkHex(value, path, label);
 }
 
+/** How deep the footnote refusal walk goes, as PHP's `Portable::MAX_DEPTH`. */
+const MAX_DEPTH = 64;
+
+/** True when a run carries a `footnote` key (any value), as PHP's `array_key_exists`. */
+export function hasFootnote(run: Any): boolean {
+  return isPlainObject(run) && Object.prototype.hasOwnProperty.call(run, "footnote") && (run as Any).footnote !== undefined;
+}
+
+/**
+ * Every run, with its path, in a list of blocks: paragraphs, headings, list
+ * items at any depth, table cells and quotes. Not into a footnote's own blocks.
+ */
+export function eachRun(blocks: Any, path: string, visit: (run: Any, runPath: string) => void, depth = 0): void {
+  if (!Array.isArray(blocks) || depth > MAX_DEPTH) return;
+  blocks.forEach((block: Any, i: number) => {
+    if (!isPlainObject(block)) return;
+    const at = `${path}/${i}`;
+    const b = block as Any;
+    const runs = (list: Any, listPath: string): void => {
+      if (Array.isArray(list)) list.forEach((run: Any, r: number) => visit(run, `${listPath}/${r}`));
+    };
+    const items = (list: Any, listPath: string, d: number): void => {
+      if (!Array.isArray(list) || d > MAX_DEPTH) return;
+      list.forEach((item: Any, n: number) => {
+        if (!isPlainObject(item)) return;
+        runs((item as Any).runs, `${listPath}/${n}/runs`);
+        items((item as Any).children, `${listPath}/${n}/children`, d + 1);
+      });
+    };
+    if (b.type === "paragraph" || b.type === "heading") runs(b.runs, `${at}/runs`);
+    if (b.type === "list") items(b.items, `${at}/items`, depth + 1);
+    if (b.type === "quote") eachRun(b.blocks, `${at}/blocks`, visit, depth + 1);
+    if (b.type === "table" && Array.isArray(b.rows)) {
+      b.rows.forEach((row: Any, r: number) => {
+        if (!isPlainObject(row) || !Array.isArray((row as Any).cells)) return;
+        (row as Any).cells.forEach((cell: Any, c: number) => {
+          if (isPlainObject(cell)) eachRun((cell as Any).blocks, `${at}/rows/${r}/cells/${c}/blocks`, visit, depth + 1);
+        });
+      });
+    }
+  });
+}
+
 /** Liberal schema validator. Mirrors PHP `Schema\Validator`. */
 export class Validator {
+  /**
+   * Where the blocks being validated live: the body, or a footnote. A footnote
+   * run is refused inside a footnote -- Word has none inside another -- and in
+   * a header or footer (see the band check in `validate()`).
+   */
+  private context: "body" | "footnote" = "body";
+
   validate(doc: Any): ValidationError[] {
+    this.context = "body";
     const errors: ValidationError[] = [];
     if (!isPlainObject(doc)) {
       return [err("/", "Doc must be a JSON object with a `blocks` array.")];
@@ -241,6 +292,18 @@ export class Validator {
           ...checkEnum(doc.page.orientation, "/page/orientation", "Page `orientation`", ["portrait", "landscape"]),
         );
         errors.push(...checkBoxSides(doc.page.margins, "/page/margins", "Page `margins`"));
+        const margins = doc.page.margins;
+        for (const distance of ["header", "footer"] as const) {
+          const value = isPlainObject(margins) ? (margins as Any)[distance] : undefined;
+          if (value !== undefined && value !== null && (!isNum(value) || value < 0)) {
+            errors.push(
+              err(
+                `/page/margins/${distance}`,
+                `Page margins \`${distance}\` is the distance from the page edge to the ${distance}: a number of points, 0 or more (36 by default).`,
+              ),
+            );
+          }
+        }
         for (const kind of ["header", "footer"] as const) {
           const band = doc.page[kind];
           if (band === undefined || band === null) continue;
@@ -248,6 +311,12 @@ export class Validator {
             errors.push(err(`/page/${kind}`, `Page \`${kind}\` must be an object (\`{ left?, center?, right?, size?, color? }\`).`));
             continue;
           }
+          // A header or footer cannot hold a footnote. This engine writes no
+          // `{blocks}` band (PHP 0.14.0, last-word#6, is not ported), but an
+          // agent writing one for either engine is told the same thing here.
+          eachRun((band as Any).blocks, `/page/${kind}/blocks`, (run, runPath) => {
+            if (hasFootnote(run)) errors.push(err(`${runPath}/footnote`, "A header or footer cannot hold a footnote."));
+          });
           for (const slot of ["left", "center", "right"]) {
             if (band[slot] !== undefined && typeof band[slot] !== "string") {
               errors.push(err(`/page/${kind}/${slot}`, `Page \`${kind}.${slot}\` must be text.`));
@@ -447,9 +516,13 @@ export class Validator {
     if (!isPlainObject(run)) {
       return [err(path, "Each run must be a JSON object with a `text` field.")];
     }
+    const isNote = hasFootnote(run);
     if (typeof run.text !== "string") {
-      errors.push(err(`${path}/text`, "Run must have a string `text` field."));
+      errors.push(
+        err(`${path}/text`, isNote ? 'A footnote run requires `"text": ""` (Word numbers the mark).' : "Run must have a string `text` field."),
+      );
     }
+    if (isNote) errors.push(...this.validateFootnote(run, path));
     for (const flag of ["bold", "italic", "underline", "strike", "code", "smallCaps"] as const) {
       if (run[flag] !== undefined && typeof run[flag] !== "boolean") {
         errors.push(err(`${path}/${flag}`, `Run \`${flag}\` must be a boolean.`));
@@ -469,6 +542,76 @@ export class Validator {
       }
     }
     return errors;
+  }
+
+  /**
+   * A footnote run: `{"text": "", "footnote": {"blocks": [...]}}`, its blocks
+   * the body's rules less `Schema.FOOTNOTE_REFUSED_TYPES` at any depth. Mirrors
+   * PHP `Validator::validateFootnote()`.
+   */
+  private validateFootnote(run: Any, runPath: string): ValidationError[] {
+    const at = `${runPath}/footnote`;
+    if (this.context === "footnote") {
+      return [err(at, "A footnote cannot hold a footnote.")];
+    }
+    const errors: ValidationError[] = [];
+    if (typeof run.text === "string" && run.text !== "") {
+      errors.push(err(`${runPath}/text`, 'A footnote run\'s text must be "": Word numbers the mark. Put the text it follows in the run before it.'));
+    }
+    const note = run.footnote;
+    // An empty JSON array is PHP's empty object too: both are "no blocks", below.
+    if (!isPlainObject(note) && !(Array.isArray(note) && note.length === 0)) {
+      errors.push(err(at, 'Footnote must be an object: {"blocks": [{"type": "paragraph", "runs": [{"text": "..."}]}]}.'));
+      return errors;
+    }
+    const blocks = (note as Any).blocks;
+    if (!Array.isArray(blocks) || blocks.length === 0) {
+      errors.push(
+        err(`${at}/blocks`, 'Footnote requires `blocks`: a non-empty list of blocks, e.g. [{"type": "paragraph", "runs": [{"text": "Source: ..."}]}].'),
+      );
+      return errors;
+    }
+
+    const outer = this.context;
+    this.context = "footnote";
+    try {
+      blocks.forEach((block: Any, i: number) => {
+        if (isPlainObject(block) && (Schema.FOOTNOTE_REFUSED_TYPES as readonly string[]).includes((block as Any).type)) {
+          return; // refused below
+        }
+        errors.push(...this.validateBlock(block, `${at}/blocks/${i}`));
+      });
+    } finally {
+      this.context = outer;
+    }
+    this.refuseInFootnote(blocks, `${at}/blocks`, errors);
+    return errors;
+  }
+
+  private refuseInFootnote(blocks: Any[], path: string, errors: ValidationError[], depth = 0): void {
+    if (depth > MAX_DEPTH) return;
+    blocks.forEach((block: Any, i: number) => {
+      if (!isPlainObject(block)) return;
+      const at = `${path}/${i}`;
+      const type = (block as Any).type;
+      if ((Schema.FOOTNOTE_REFUSED_TYPES as readonly string[]).includes(type)) {
+        errors.push(err(`${at}/type`, `A footnote cannot hold a ${type} block.`));
+        return;
+      }
+      if (type === "quote" && Array.isArray((block as Any).blocks)) {
+        this.refuseInFootnote((block as Any).blocks, `${at}/blocks`, errors, depth + 1);
+      }
+      if (type === "table" && Array.isArray((block as Any).rows)) {
+        (block as Any).rows.forEach((row: Any, r: number) => {
+          const cells = isPlainObject(row) && Array.isArray((row as Any).cells) ? (row as Any).cells : [];
+          cells.forEach((cell: Any, c: number) => {
+            if (isPlainObject(cell) && Array.isArray((cell as Any).blocks)) {
+              this.refuseInFootnote((cell as Any).blocks, `${at}/rows/${r}/cells/${c}/blocks`, errors, depth + 1);
+            }
+          });
+        });
+      }
+    });
   }
 
   private validateListItem(item: Any, path: string): ValidationError[] {

@@ -9,7 +9,7 @@ import { Agent } from "../src";
  * engine pins this hash over LF-normalised content; edit all three copies,
  * then all three constants.
  */
-const AGENT_GUIDE_SHA256 = "df27c8208737d11f7daceca317d8ab7ed937b9904af165383424c6f90d860cfb";
+const AGENT_GUIDE_SHA256 = "17d90df6ff72583218ef919600b6036d929190973304e558a9e99e3c47d5d712";
 const lf = (s: string): string => s.replace(/\r\n/g, "\n");
 
 describe("agent guide", () => {

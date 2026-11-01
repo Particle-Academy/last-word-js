@@ -42,6 +42,22 @@ const EMU_PER_TWIP = 635;
 const CHART_DOCPR_BASE = 10000;
 const REL_DOCUMENT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
 const REL_CORE = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties";
+const REL_SETTINGS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings";
+const REL_FOOTNOTES = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes";
+
+/** The mark that opens a footnote's own text: Word's FootnoteReference-styled w:footnoteRef. Shared with PHP. */
+const FOOTNOTE_MARK = `<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteRef/></w:r>`;
+
+/**
+ * Block types a footnote's blocks refuse, at any depth (`Schema.FOOTNOTE_REFUSED_TYPES`):
+ * validation refuses them, and unvalidated they are written as nothing.
+ */
+const FOOTNOTE_REFUSED_TYPES: readonly string[] = ["chart", "pageBreak", "portable"];
+
+/** A run carrying a `footnote` key, as PHP's `array_key_exists('footnote', $run)`. */
+function isFootnoteRun(run: unknown): boolean {
+  return isPlainObject(run) && Object.prototype.hasOwnProperty.call(run, "footnote") && (run as Any).footnote !== undefined;
+}
 /** header / footer relationship types are `${REL_BASE}/header` and `${REL_BASE}/footer`. */
 const REL_BASE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
@@ -229,9 +245,12 @@ interface PageGeometry {
   bottom: number;
   left: number;
   orientation: "portrait" | "landscape";
+  /** The header / footer distances (`w:pgMar` header / footer), in twips. */
+  header: number;
+  footer: number;
 }
 
-/** Page size and margins in twips. */
+/** Page size, margins and the header / footer distances, in twips. */
 export function pageGeometry(page: Any): PageGeometry {
   const size = typeof page?.size === "string" ? page.size.toLowerCase() : "letter";
   let [w, h] = PAGE_SIZES[size] ?? PAGE_SIZES.letter!;
@@ -242,8 +261,25 @@ export function pageGeometry(page: Any): PageGeometry {
   if (orientation === "landscape") [w, h] = [h, w];
 
   const side = (k: string): number => twips(page?.margins?.[k]) ?? 1440;
+  // The header / footer distances are `margins.header` / `margins.footer`
+  // (Word keeps them on w:pgMar too). Unsigned in OOXML (ST_TwipsMeasure): an
+  // unvalidated negative is 0. Mirrors PHP `pageGeometry()`.
+  const distance = (k: string): number => {
+    const own = twips(page?.margins?.[k]);
+    return own !== null ? Math.max(0, own) : 720;
+  };
 
-  return { w, h, top: side("top"), right: side("right"), bottom: side("bottom"), left: side("left"), orientation };
+  return {
+    w,
+    h,
+    top: side("top"),
+    right: side("right"),
+    bottom: side("bottom"),
+    left: side("left"),
+    orientation,
+    header: distance("header"),
+    footer: distance("footer"),
+  };
 }
 
 interface Slot {
@@ -362,6 +398,25 @@ export class DocxWriter {
   private bands: { kind: "header" | "footer"; xml: string }[] = [];
 
   /**
+   * The document's footnotes: `w:footnote` content (without the wrapper),
+   * numbered 1, 2, 3 in document order as their runs render (footnote N is
+   * index N-1). The separator (-1) and continuation separator (0) Word requires
+   * are written around them. Empty without a footnote, and then nothing about
+   * the package changes.
+   */
+  private footnotes: string[] = [];
+
+  /**
+   * word/footnotes.xml's OWN relationships (its links and images), written as
+   * `word/_rels/footnotes.xml.rels`, with the hyperlink ids they dedupe on.
+   */
+  private footnoteRels: Rel[] = [];
+  private footnoteHyperlinkIds = new Map<string, string>();
+
+  /** True while a footnote's blocks render: a footnote run inside one renders as nothing. */
+  private inFootnote = false;
+
+  /**
    * The next NUMBERED relationship id. Counted over the numbered rels only: the
    * band rels (rIdHeader1 / rIdFooter1) are named, and counting them shifted
    * every hyperlink and image id two places away from the PHP engine's.
@@ -416,6 +471,10 @@ export class DocxWriter {
     this.media = [];
     this.drawingId = 0;
     this.charts = [];
+    this.footnotes = [];
+    this.footnoteRels = [];
+    this.footnoteHyperlinkIds = new Map();
+    this.inFootnote = false;
 
     // Table grids are laid out against the section's content width, so it has
     // to be known before any block renders. Carrying 9360 as a literal — which
@@ -455,11 +514,20 @@ export class DocxWriter {
       { name: "word/styles.xml", data: encode(this.stylesXml(doc)) },
       { name: "word/numbering.xml", data: encode(this.numberingXml()) },
     );
+    if (this.footnotes.length > 0) {
+      files.push({ name: "word/settings.xml", data: encode(this.settingsXml()) });
+    }
     if (this.template?.hasTheme() === true) {
       files.push({ name: "word/theme/theme1.xml", data: encode(this.template.theme()!) });
     }
     for (const b of this.bands) {
       files.push({ name: `word/${b.kind}1.xml`, data: encode(b.xml) });
+    }
+    if (this.footnotes.length > 0) {
+      files.push({ name: "word/footnotes.xml", data: encode(this.footnotesXml()) });
+      if (this.footnoteRels.length > 0) {
+        files.push({ name: "word/_rels/footnotes.xml.rels", data: encode(this.relsXml(this.footnoteRels)) });
+      }
     }
     files.push({ name: "word/_rels/document.xml.rels", data: encode(this.documentRelsXml()) });
     for (const m of this.media) {
@@ -491,6 +559,9 @@ export class DocxWriter {
       // single two-row table in Word, with the first table's column grid
       // imposed on the second. PHP and Python have always done this; the port
       // did not, and its own reference document has adjacent tables.
+      if (this.inFootnote && FOOTNOTE_REFUSED_TYPES.includes(type)) {
+        continue; // validation refuses these in a footnote; unvalidated, they are nothing
+      }
       if (type === "table" && prevWasTable) out += `<w:p/>`;
       out += this.renderBlock(block as Any, ctx);
       prevWasTable = type === "table";
@@ -585,6 +656,17 @@ export class DocxWriter {
   private renderRuns(runs: Run[]): string {
     let out = "";
     for (const run of runs) {
+      if (isFootnoteRun(run)) {
+        // The mark only: a footnote run carries no text, so no link either.
+        // Unvalidated text typed on the mark is written before it rather than
+        // lost, which is what repair does.
+        if (typeof run.text === "string" && run.text !== "") {
+          const { footnote: _note, ...plain } = run as Any;
+          out += this.renderRuns([plain as Run]);
+        }
+        out += this.renderFootnoteRun(run);
+        continue;
+      }
       if (typeof run?.text !== "string") continue;
       if (run.link) {
         const rid = this.hyperlinkRel(run.link);
@@ -648,6 +730,98 @@ export class DocxWriter {
     });
     if (content === "") content = `<w:t xml:space="preserve"></w:t>`;
     return `<w:r>${pr}${content}</w:r>`;
+  }
+
+  // ── Footnotes ─────────────────────────────────────────────────────────────
+
+  /**
+   * A footnote run: its blocks rendered into the next footnote, and the
+   * reference run that marks it in the text. Nothing inside another footnote,
+   * and nothing for a footnote with no blocks to render (validation refuses
+   * both; this engine renders no runs in a header or footer). Mirrors PHP
+   * `renderFootnoteRun()`.
+   *
+   * The blocks render with the footnote part's OWN relationships swapped in,
+   * so a link or image in a footnote registers in
+   * `word/_rels/footnotes.xml.rels`. Media share the document's counter, so
+   * names and drawing ids stay unique across the package.
+   */
+  private renderFootnoteRun(run: Any): string {
+    const note = run.footnote;
+    const blocks: Block[] = isPlainObject(note) && Array.isArray((note as Any).blocks) ? (note as Any).blocks : [];
+    if (this.inFootnote || blocks.length === 0) return "";
+
+    const [rels, hyperlinkIds] = [this.rels, this.hyperlinkIds];
+    [this.rels, this.hyperlinkIds] = [this.footnoteRels, this.footnoteHyperlinkIds];
+    this.inFootnote = true;
+    let content: string;
+    try {
+      content = this.renderBlocks(blocks, { paragraphStyle: "FootnoteText" });
+    } finally {
+      [this.footnoteRels, this.footnoteHyperlinkIds] = [this.rels, this.hyperlinkIds];
+      [this.rels, this.hyperlinkIds] = [rels, hyperlinkIds];
+      this.inFootnote = false;
+    }
+    if (content === "") return "";
+
+    // The mark opens the first paragraph, after its properties, followed by
+    // the space Word puts between the number and the text. A footnote that
+    // opens with a table or a quote gets a paragraph of its own for the mark,
+    // and one that ends with a table a closing paragraph: a footnote is a
+    // block container, and must end in a paragraph as a cell must.
+    const mark = FOOTNOTE_MARK + `<w:r><w:t xml:space="preserve"> </w:t></w:r>`;
+    if (content.startsWith("<w:p>")) {
+      let at = "<w:p>".length;
+      if (content.slice(at, at + "<w:pPr>".length) === "<w:pPr>") {
+        at = content.indexOf("</w:pPr>") + "</w:pPr>".length;
+      }
+      content = content.slice(0, at) + mark + content.slice(at);
+    } else {
+      content = `<w:p><w:pPr><w:pStyle w:val="FootnoteText"/></w:pPr>${FOOTNOTE_MARK}</w:p>` + content;
+    }
+    if (!content.endsWith("</w:p>")) {
+      content += `<w:p><w:pPr><w:pStyle w:val="FootnoteText"/></w:pPr></w:p>`;
+    }
+
+    this.footnotes.push(content);
+    const id = this.footnotes.length;
+    return `<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="${id}"/></w:r>`;
+  }
+
+  /**
+   * word/footnotes.xml: the separator (-1) and continuation separator (0) Word
+   * requires before any footnote of the document's own -- without them Word
+   * reports the file as damaged -- then the document's, from 1.
+   */
+  private footnotesXml(): string {
+    const separator = (type: string, id: number, tag: string): string =>
+      `<w:footnote w:type="${type}" w:id="${id}">` +
+      `<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:${tag}/></w:r></w:p>` +
+      `</w:footnote>`;
+
+    let xml =
+      Xml.declaration() +
+      `<w:footnotes xmlns:w="${NS_W}" xmlns:r="${NS_R}" xmlns:wp="${NS_WP}" xmlns:a="${NS_A}" xmlns:pic="${NS_PIC}">` +
+      separator("separator", -1, "separator") +
+      separator("continuationSeparator", 0, "continuationSeparator");
+    this.footnotes.forEach((content, i) => {
+      xml += `<w:footnote w:id="${i + 1}">${content}</w:footnote>`;
+    });
+    return xml + `</w:footnotes>`;
+  }
+
+  /**
+   * The settings part, written only when something needs it: in this engine,
+   * footnotes. The footnotePr names the two separator footnotes, as Word itself
+   * writes it.
+   */
+  private settingsXml(): string {
+    return (
+      Xml.declaration() +
+      `<w:settings xmlns:w="${NS_W}">` +
+      (this.footnotes.length > 0 ? `<w:footnotePr><w:footnote w:id="-1"/><w:footnote w:id="0"/></w:footnotePr>` : "") +
+      `</w:settings>`
+    );
   }
 
   private hyperlinkRel(url: string): string {
@@ -915,7 +1089,7 @@ export class DocxWriter {
     return (
       `<w:sectPr>${refs}<w:pgSz w:w="${page.w}" w:h="${page.h}"${orient}/>` +
       `<w:pgMar w:top="${page.top}" w:right="${page.right}" w:bottom="${page.bottom}" w:left="${page.left}"` +
-      ` w:header="720" w:footer="720" w:gutter="0"/>` +
+      ` w:header="${page.header}" w:footer="${page.footer}" w:gutter="0"/>` +
       `</w:sectPr>`
     );
   }
@@ -935,6 +1109,9 @@ export class DocxWriter {
       `<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>` +
       `<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>` +
       `<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>`;
+    if (this.footnotes.length > 0) {
+      overrides += `<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>`;
+    }
     if (this.template?.hasTheme() === true) {
       // A part present but undeclared makes the package invalid, and Word reports
       // that as "unreadable content" without naming the part.
@@ -942,6 +1119,9 @@ export class DocxWriter {
     }
     for (const b of this.bands) {
       overrides += `<Override PartName="/word/${b.kind}1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${b.kind}+xml"/>`;
+    }
+    if (this.footnotes.length > 0) {
+      overrides += `<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>`;
     }
     this.charts.forEach((_, i) => {
       overrides += `<Override PartName="/word/charts/chart${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>`;
@@ -977,9 +1157,29 @@ export class DocxWriter {
     );
   }
 
+  /**
+   * The document's relationships in the PHP engine's order: styles, numbering
+   * and theme; then settings and footnotes, when written; then the bands, and
+   * the hyperlinks, images and charts in the order they were made.
+   */
   private documentRelsXml(): string {
+    const fixed = [REL_STYLES, REL_NUMBERING, REL_THEME];
+    const parts: Rel[] = [];
+    if (this.footnotes.length > 0) {
+      parts.push({ id: "rIdSettings", type: REL_SETTINGS, target: "settings.xml", external: false });
+      parts.push({ id: "rIdFootnotes", type: REL_FOOTNOTES, target: "footnotes.xml", external: false });
+    }
+    return this.relsXml([
+      ...this.rels.filter((r) => fixed.includes(r.type)),
+      ...parts,
+      ...this.rels.filter((r) => !fixed.includes(r.type)),
+    ]);
+  }
+
+  /** A relationships part: the document's, or a footnotes part's own. */
+  private relsXml(rels: Rel[]): string {
     let out = Xml.declaration() + `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`;
-    for (const rel of this.rels) {
+    for (const rel of rels) {
       const mode = rel.external ? ` TargetMode="External"` : "";
       out += `<Relationship Id="${rel.id}" Type="${rel.type}" Target="${Xml.attr(rel.target)}"${mode}/>`;
     }
@@ -1081,6 +1281,23 @@ export class DocxWriter {
     styles["Hyperlink"] =
       `<w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/>` +
       `<w:rPr><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr></w:style>`;
+
+    // Only with a footnote, so every other document's styles stay byte-identical.
+    // Word's own names ("footnote text", "footnote reference"): a template that
+    // defines them keeps its own, as for every other style. Shared with PHP.
+    if (this.footnotes.length > 0) {
+      styles["FootnoteText"] =
+        `<w:style w:type="paragraph" w:styleId="FootnoteText">` +
+        `<w:name w:val="footnote text"/><w:basedOn w:val="Normal"/><w:uiPriority w:val="99"/><w:unhideWhenUsed/>` +
+        `<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>` +
+        `<w:rPr><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr>` +
+        `</w:style>`;
+      styles["FootnoteReference"] =
+        `<w:style w:type="character" w:styleId="FootnoteReference">` +
+        `<w:name w:val="footnote reference"/><w:uiPriority w:val="99"/><w:unhideWhenUsed/>` +
+        `<w:rPr><w:vertAlign w:val="superscript"/></w:rPr>` +
+        `</w:style>`;
+    }
 
     // The `LastWordTable` style used to live here, carrying the borders, the
     // cell margins and the first-row bold that PHP and Python wrote inline.
