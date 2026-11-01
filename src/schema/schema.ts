@@ -2,7 +2,7 @@
  * Schema constants describing the Doc shape. Mirrors PHP `Schema\Schema`.
  */
 import { SUPPORTED_CHART_TYPES } from "../helpers/chart";
-import type { ResolvedPageMargins } from "./types";
+import type { FieldToken, ResolvedPageMargins } from "./types";
 
 const isFiniteNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
@@ -44,6 +44,104 @@ export const Schema = {
    */
   PAGE_MARGIN_DEFAULT: 72,
   PAGE_BAND_DISTANCE_DEFAULT: 36,
+
+  /**
+   * The page's running bands, in the order the schema lists them and read()
+   * returns them (PHP 0.16.0). `header` / `footer` are every page; with a
+   * `firstHeader` they are every page but the first, and with an `evenHeader`
+   * the odd pages. Each variant is the same shape as `header`.
+   */
+  PAGE_BANDS: ["header", "footer", "firstHeader", "firstFooter", "evenHeader", "evenFooter"] as const,
+
+  /** A band key => [kind, Word reference type]. */
+  PAGE_BAND_SLOTS: {
+    header: ["header", "default"],
+    footer: ["footer", "default"],
+    firstHeader: ["header", "first"],
+    firstFooter: ["footer", "first"],
+    evenHeader: ["header", "even"],
+    evenFooter: ["footer", "even"],
+  } as const,
+
+  /**
+   * The field tokens live in header and footer text (PHP 0.16.0), as one regex:
+   * `{page}` `{pages}` `{section}` `{sectionpages}` `{author}` `{title}`
+   * `{filename}`, and `{date}` / `{time}` with an optional `:FORMAT` -- a Word
+   * date-time picture, one or more characters, none of `{`, `}`, `"` or a
+   * backslash. Names are lower-case and exact. Anything else in braces is
+   * literal text, and so is `{page:x}`: only date and time take a format.
+   * Group 1 is a plain name; group 2 a dated name and group 3 its format.
+   * Mirrors PHP `Schema::FIELD_TOKEN`. Not global: use `splitFieldTokens()`.
+   */
+  FIELD_TOKEN: /\{(?:(page|pages|section|sectionpages|author|title|filename)|(date|time)(?::([^{}"\\]+))?)\}/,
+
+  /** Field token name => Word field instruction. */
+  FIELD_INSTRUCTIONS: {
+    page: "PAGE",
+    pages: "NUMPAGES",
+    section: "SECTION",
+    sectionpages: "SECTIONPAGES",
+    author: "AUTHOR",
+    title: "TITLE",
+    filename: "FILENAME",
+    date: "DATE",
+    time: "TIME",
+  } as Readonly<Record<string, string>>,
+
+  /**
+   * Header/footer text split into literal text and field tokens, in order: a
+   * string is literal, an object is a field -- `{token, name, instruction}`,
+   * where `instruction` is the Word field instruction without its surrounding
+   * spaces (`PAGE`, `DATE \@ "yyyy-MM-dd"`). Empty pieces are dropped. Mirrors
+   * PHP `Schema::splitFieldTokens()`.
+   */
+  splitFieldTokens(text: string): (string | FieldToken)[] {
+    const out: (string | FieldToken)[] = [];
+    let at = 0;
+    for (const m of text.matchAll(new RegExp(this.FIELD_TOKEN.source, "g"))) {
+      const token = m[0];
+      const offset = m.index ?? 0;
+      if (offset > at) out.push(text.slice(at, offset));
+      const plain = m[1] ?? "";
+      const name = plain !== "" ? plain : (m[2] ?? "");
+      const format = plain === "" ? (m[3] ?? "") : "";
+      out.push({
+        token,
+        name,
+        instruction: this.FIELD_INSTRUCTIONS[name] + (format !== "" ? ` \\@ "${format}"` : ""),
+      });
+      at = offset + token.length;
+    }
+    if (at < text.length) out.push(text.slice(at));
+    return out;
+  },
+
+  /**
+   * A Word field instruction back as its token, or null when it is not one:
+   * the first word names the field (any case), `\@ "FORMAT"` (or an unquoted
+   * `\@ FORMAT`) is DATE's and TIME's picture, and every other switch or
+   * argument is dropped (`\* MERGEFORMAT`, FILENAME's `\p`, AUTHOR's new name).
+   * A picture the grammar cannot hold reads as the bare `{date}` / `{time}`.
+   * Mirrors PHP `Schema::fieldTokenOf()`; whitespace is PCRE's `\s` (ASCII),
+   * not JavaScript's wider one.
+   */
+  fieldTokenOf(instruction: string): string | null {
+    const m = /^[ \t\n\v\f\r]*([A-Za-z]+)([\s\S]*)$/.exec(instruction);
+    if (m === null) return null;
+    const word = m[1]!.toUpperCase();
+    const name = Object.keys(this.FIELD_INSTRUCTIONS).find((k) => this.FIELD_INSTRUCTIONS[k] === word);
+    if (name === undefined) return null;
+    if (name === "date" || name === "time") {
+      const p = /\\@[ \t\n\v\f\r]*(?:"([^"]*)"|([^ \t\n\v\f\r]+))/.exec(m[2]!);
+      if (p !== null) {
+        const format = (p[1] ?? "") !== "" ? p[1]! : (p[2] ?? "");
+        const token = `{${name}:${format}}`;
+        const check = this.FIELD_TOKEN.exec(token);
+        if (format !== "" && check !== null && check[0] === token) return token;
+      }
+    }
+    return `{${name}}`;
+  },
 
   /**
    * Every page margin and both header/footer distances, in points, defaults
@@ -111,7 +209,7 @@ export const Schema = {
     const bandSlot = {
       type: "string",
       description:
-        'Text. `{page}` is the current page number and `{pages}` the page count, both live fields: "Page {page} of {pages}".',
+        'Text with live Word fields: {page} and {pages} ("Page {page} of {pages}"), {section}, {sectionpages}, {author} (meta.author), {title} (the document title), {filename}, {date} and {time} in the reader\'s locale, or {date:FORMAT} / {time:FORMAT} with a Word picture such as {date:d MMMM yyyy} or {time:HH:mm}. Anything else in braces is literal text.',
     };
     const band = {
       type: "object",
@@ -174,7 +272,22 @@ export const Schema = {
       type: "object",
       required: this.docRequiredKeys(),
       properties: {
-        title: { type: "string" },
+        title: {
+          type: "string",
+          description:
+            "The document title: docProps/core.xml dc:title, what Word shows in File > Info and what a {title} field in a header or footer shows. Not rendered in the body; write a heading for that.",
+        },
+        meta: {
+          type: "object",
+          additionalProperties: false,
+          description: "Document properties beyond the title (which is the top-level `title`).",
+          properties: {
+            author: {
+              type: "string",
+              description: "docProps/core.xml dc:creator: Word's Author property, and what an {author} field in a header or footer shows.",
+            },
+          },
+        },
         blocks: { type: "array", items: { $ref: "#/definitions/block" } },
         page: {
           type: "object",
@@ -184,10 +297,33 @@ export const Schema = {
             size: { type: "string", enum: [...this.PAGE_SIZES] },
             orientation: { type: "string", enum: ["portrait", "landscape"] },
             margins: { $ref: "#/definitions/pageMargins" },
-            header: { $ref: "#/definitions/band", description: "A running header on every page." },
+            header: {
+              $ref: "#/definitions/band",
+              description: "A running header on every page. With a firstHeader, every page but the first; with an evenHeader, the odd pages.",
+            },
             footer: {
               $ref: "#/definitions/band",
-              description: "A running footer on every page -- where a multi-page document carries its page numbers.",
+              description:
+                "A running footer on every page -- where a multi-page document carries its page numbers. With a firstFooter, every page but the first; with an evenFooter, the odd pages.",
+            },
+            firstHeader: {
+              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blankBand" }],
+              description:
+                'The header of the FIRST page only, in place of header there (Word\'s "Different first page"): a title-page header, a plainer one after. {"blocks": []} leaves page one with no header when header is set.',
+            },
+            firstFooter: {
+              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blankBand" }],
+              description:
+                'The footer of the first page only, in place of footer there. Without it the footer is on the first page too. {"blocks": []} leaves page one with no footer when footer is set.',
+            },
+            evenHeader: {
+              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blankBand" }],
+              description:
+                'The header of even pages (Word\'s "Different odd and even pages"); header is then the odd pages\'. For a bound, two-sided document.',
+            },
+            evenFooter: {
+              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blankBand" }],
+              description: "The footer of even pages; footer is then the odd pages'. Without it the footer is on even pages too.",
             },
           },
         },
@@ -237,6 +373,14 @@ export const Schema = {
           },
         },
         band,
+        blankBand: {
+          type: "object",
+          required: ["blocks"],
+          additionalProperties: false,
+          description:
+            'An empty first or even band, {"blocks": []}: that page shows no header (footer) where the default would otherwise show. (This engine writes no {blocks} band with content.)',
+          properties: { blocks: { type: "array", maxItems: 0 } },
+        },
         listItem: {
           type: "object",
           required: ["runs"],

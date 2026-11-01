@@ -14,6 +14,7 @@ import type { Block, Doc, ListItem, Run } from "../schema/types";
 import { SourceArchive } from "../zip/source-archive";
 import { TEMPLATE, sourceKind } from "../zip/office-template";
 import { at, el, els, parseXml, type XmlNode } from "./xml";
+import { Schema } from "../schema/schema";
 import { EMU_PER_PX, SDT_TAG_CODE, SDT_TAG_QUOTE, splitColumns, PAGE_SIZES } from "../writer/docx-writer";
 import { NS_C, readChart } from "./chart-reader";
 import { DEFAULT_ASPECT } from "../helpers/chart";
@@ -101,6 +102,7 @@ export class DocxReader {
     this.inFootnote = false;
     this.footnoteCache = new Map();
     this.loadFootnotes();
+    this.evenAndOddHeaders = this.readEvenAndOdd();
     this.numOrdered = this.loadNumbering();
 
     const docXml = this.partText("word/document.xml");
@@ -115,6 +117,9 @@ export class DocxReader {
 
     const title = this.readTitle();
     if (title !== null) doc.title = title;
+    // meta.author (PHP 0.16.0): dc:creator, beside the title it shares a part with.
+    const author = this.readCoreElement("creator");
+    if (author !== null && author !== "") doc.meta = { author };
 
     // Section geometry and document defaults are surfaced ONLY when they
     // differ from what the writer produces unasked, for the same reason table
@@ -159,28 +164,95 @@ export class DocxReader {
     }
     if (Object.keys(margins).length > 0) out.margins = margins;
 
-    for (const kind of ["header", "footer"] as const) {
-      const band = this.readBand(sectPr, kind);
-      if (band !== null) out[kind] = band;
-    }
+    Object.assign(out, this.readBands(sectPr));
 
     return Object.keys(out).length > 0 ? out : null;
   }
 
   /**
-   * The section's DEFAULT header or footer as a band. Mirrors PHP
-   * DocxReader::parseBand(): tab-separated segments become left/center/right,
-   * PAGE / NUMPAGES fields (simple or complex) become `{page}` / `{pages}`.
+   * The section's headers and footers, by model key, in `Schema.PAGE_BANDS`
+   * order: `header` / `footer` from the DEFAULT references, and (PHP 0.16.0)
+   * `firstHeader` / `firstFooter` from the FIRST ones while `w:titlePg` is on,
+   * `evenHeader` / `evenFooter` from the EVEN ones while settings turn on
+   * `w:evenAndOddHeaders`. A switch that is off makes its references nothing,
+   * as in Word.
+   *
+   * A variant that names the same part as the default is not repeated (the
+   * writer references the default for page one when only one kind has a
+   * first-page band). One with no part, or an empty part, while the default
+   * has content, is `{"blocks": []}`: that page shows no header in Word, and
+   * the model says so rather than letting a write-back put the default there.
+   * Mirrors PHP `DocxReader::parseBands()`.
    */
-  private readBand(sectPr: XmlNode, kind: "header" | "footer"): Record<string, unknown> | null {
+  private readBands(sectPr: XmlNode): Record<string, unknown> {
+    const titlePgEl = el(sectPr, "titlePg");
+    const titlePg = titlePgEl !== undefined && toggleOn(at(titlePgEl, "val"));
+    const found: Record<string, Record<string, unknown>> = {};
+    for (const kind of ["header", "footer"] as const) {
+      const def = this.bandTarget(sectPr, kind, "default");
+      const band = def !== null ? this.readBandPart(def) : null;
+      if (band !== null) found[kind] = band;
+      for (const [type, on] of [
+        ["first", titlePg],
+        ["even", this.evenAndOddHeaders],
+      ] as const) {
+        if (!on) continue;
+        const key = `${type}${kind === "header" ? "Header" : "Footer"}`;
+        const target = this.bandTarget(sectPr, kind, type);
+        if (target !== null && target === def) continue;
+        let variant: Record<string, unknown> | null = target !== null ? this.readBandPart(target) : null;
+        if (variant === null && band !== null) variant = { blocks: [] };
+        if (variant !== null) found[key] = variant;
+      }
+    }
+
+    const out: Record<string, unknown> = {};
+    for (const key of Schema.PAGE_BANDS) {
+      if (found[key] !== undefined) out[key] = found[key];
+    }
+    return out;
+  }
+
+  /**
+   * The part name (`word/header1.xml`) a section's header or footer reference
+   * of this type names, or null. The last reference of a type wins, as it
+   * always has for the default; a reference with no type is the default.
+   */
+  private bandTarget(sectPr: XmlNode, kind: "header" | "footer", type: string): string | null {
     let partName: string | null = null;
     for (const node of sectPr.children) {
-      if (node.name === `${kind}Reference` && (at(node, "type") === "default" || at(node, "type") === undefined)) {
+      if (node.name === `${kind}Reference` && (at(node, "type") ?? "default") === type) {
         const target = this.rels[at(node, "id") ?? ""]?.target;
         partName = typeof target === "string" ? "word/" + target.replace(/\\/g, "/").replace(/^\/+/, "") : null;
       }
     }
-    if (partName === null) return null;
+    return partName;
+  }
+
+  /** `w:evenAndOddHeaders` in word/settings.xml: even pages have their own header and footer. */
+  private evenAndOddHeaders = false;
+
+  /** Whether the settings part the document's rels name turns on even/odd headers. A DOCTYPE leaves it off. */
+  private readEvenAndOdd(): boolean {
+    const relsXml = this.partText("word/_rels/document.xml.rels");
+    const target = relsXml !== null ? relTargetOfType(relsXml, "settings") : null;
+    if (target === null) return false;
+    const name = target.startsWith("/") ? target.replace(/^\/+/, "") : "word/" + target.split("\\").join("/").replace(/^\/+/, "");
+    const xml = this.partText(name);
+    if (xml === null || /<!DOCTYPE/i.test(xml)) return false;
+    const node = el(parseXml(xml), "evenAndOddHeaders");
+    return node !== undefined && toggleOn(at(node, "val"));
+  }
+
+  /**
+   * One header or footer part as a one-line band: left / center / right text
+   * with its field tokens read back (`{page}`, `{date:yyyy-MM-dd}`, ...). Null
+   * when the part is missing or holds no text. Mirrors the slot half of PHP
+   * DocxReader::parseBandPart(): tab-separated segments become
+   * left/center/right; a field that is a token becomes it and its cached result
+   * is skipped, any other field keeps its cached result as text.
+   */
+  private readBandPart(partName: string): Record<string, unknown> | null {
     const xml = this.partText(partName);
     const root = xml ? parseXml(xml) : null;
     const p = el(root, "p");
@@ -196,7 +268,9 @@ export class DocxReader {
       for (const child of node.children) {
         const name = child.name;
         if (name === "fldSimple") {
-          append(fieldToken(at(child, "instr") ?? ""));
+          const token = fieldToken(at(child, "instr") ?? "");
+          if (token !== "") append(token);
+          else walk(child); // not a token: its cached result is the text
         } else if (name === "r") {
           firstRun ??= child;
           walk(child);
@@ -204,9 +278,12 @@ export class DocxReader {
           const type = at(child, "fldCharType");
           if (type === "begin") {
             field = "";
-          } else if (type === "separate" && field !== null) {
-            if (typeof field === "string") append(fieldToken(field));
-            field = false;
+          } else if (type === "separate" && typeof field === "string") {
+            const token = fieldToken(field);
+            append(token);
+            // A token's cached result ("1", the author) is skipped; any other
+            // field's is its text, as in PHP's blocks band.
+            field = token !== "" ? false : null;
           } else if (type === "end") {
             field = null;
           }
@@ -271,11 +348,19 @@ export class DocxReader {
   }
 
   private readTitle(): string | null {
+    return this.readCoreElement("title");
+  }
+
+  /**
+   * One Dublin Core element's text from docProps/core.xml (`title`,
+   * `creator`), or null when the part is missing, declares a DOCTYPE, or has
+   * no such element. (An empty title still reads as "", as it always has here.)
+   */
+  private readCoreElement(localName: string): string | null {
     const xml = this.partText("docProps/core.xml");
-    if (!xml) return null;
-    const root = parseXml(xml);
-    const title = el(root, "title");
-    return title ? title.text : null;
+    if (!xml || /<!DOCTYPE/i.test(xml)) return null;
+    const node = el(parseXml(xml), localName);
+    return node ? node.text : null;
   }
 
   private loadRels(name: string): Record<string, RelInfo> {
@@ -986,10 +1071,18 @@ function isEmptyParagraph(block: Block | undefined): boolean {
 }
 
 /** A numeric attribute, or null when absent or unparseable. */
-/** A field instruction as a band token: PAGE → {page}, NUMPAGES → {pages}, else ''. Mirrors PHP. */
+/**
+ * A field instruction as a band token (`Schema.fieldTokenOf()`): PAGE {page},
+ * NUMPAGES {pages}, SECTIONPAGES {sectionpages}, `DATE \@ "d MMMM yyyy"`
+ * {date:d MMMM yyyy} ... and '' for any other field. Mirrors PHP.
+ */
 function fieldToken(instr: string): string {
-  const word = (instr.trim().split(/[ \\]/)[0] ?? "").toUpperCase();
-  return word === "PAGE" ? "{page}" : word === "NUMPAGES" || word === "SECTIONPAGES" ? "{pages}" : "";
+  return Schema.fieldTokenOf(instr) ?? "";
+}
+
+/** A WordprocessingML on/off value: on unless it says 0, false or off. */
+function toggleOn(val: string | undefined): boolean {
+  return val === undefined || !["0", "false", "none", "off"].includes(val.toLowerCase());
 }
 
 function numAttr(node: XmlNode | undefined, name: string): number | null {

@@ -81,14 +81,17 @@ export class Repairer {
     if (doc.title !== undefined && typeof doc.title !== "string") {
       doc.title = String(doc.title);
     }
-    doc.blocks = this.repairBlocks(doc.blocks ?? [], "/blocks");
+    let out: Any = doc;
+    if ("meta" in doc) out = this.repairMeta(doc);
+    out.blocks = this.repairBlocks(out.blocks ?? [], "/blocks");
 
     // A `{blocks}` header or footer (PHP 0.14.0; this engine does not write one)
     // is repaired in the band's context, so a footnote in it is dropped with a
-    // note, as PHP does: a header or footer cannot hold one.
-    if (isPlainObject(doc.page)) {
-      for (const kind of ["header", "footer"] as const) {
-        const band = doc.page[kind];
+    // note, as PHP does: a header or footer cannot hold one. Every band key,
+    // first and even included (PHP 0.16.0).
+    if (isPlainObject(out.page)) {
+      for (const kind of Schema.PAGE_BANDS) {
+        const band = out.page[kind];
         if (isPlainObject(band) && Array.isArray((band as Any).blocks)) {
           this.context = "band";
           try {
@@ -100,7 +103,50 @@ export class Repairer {
       }
     }
 
-    return doc;
+    return out;
+  }
+
+  /**
+   * `meta` (PHP 0.16.0): `meta.title` moves to the top-level `title` when there
+   * is none (and is dropped when there is: the top-level one is the title); a
+   * non-text author is coerced when it is a scalar and dropped otherwise; a
+   * `meta` that is not an object is dropped, each with a note. Mirrors PHP
+   * `Repairer::repairMeta()`, the title placed first as PHP places it.
+   */
+  private repairMeta(doc: Any): Any {
+    const meta = doc.meta;
+    if (Array.isArray(meta) && meta.length === 0) {
+      doc.meta = {}; // PHP's empty object
+      return doc;
+    }
+    if (!isPlainObject(meta)) {
+      delete doc.meta;
+      this.notes.push({ path: "/meta", message: "Dropped a meta that is not an object." });
+      return doc;
+    }
+    const m: Any = { ...meta };
+    let out: Any = doc;
+    if ("title" in m) {
+      if (!("title" in doc) && typeof m.title === "string") {
+        out = { title: m.title, ...doc };
+        this.notes.push({ path: "/meta/title", message: "Moved meta.title to the document title." });
+      } else {
+        this.notes.push({ path: "/meta/title", message: 'Dropped meta.title: the document title is the top-level "title".' });
+      }
+      delete m.title;
+    }
+    if ("author" in m && typeof m.author !== "string") {
+      if (["number", "boolean", "bigint"].includes(typeof m.author)) {
+        // PHP's (string) cast: true is "1", false is "".
+        m.author = typeof m.author === "boolean" ? (m.author ? "1" : "") : String(m.author);
+        this.notes.push({ path: "/meta/author", message: "Coerced a non-text author to text." });
+      } else {
+        delete m.author;
+        this.notes.push({ path: "/meta/author", message: "Dropped a non-text author." });
+      }
+    }
+    out.meta = m;
+    return out;
   }
 
   private repairBlocks(blocks: Any, path: string): Record<string, unknown>[] {

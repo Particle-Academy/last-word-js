@@ -290,15 +290,63 @@ export interface ResolvedPageMargins {
   footer: number;
 }
 
+/**
+ * A running header or footer: one line with a left, a centre and a right slot.
+ * Slot text carries live field tokens ({page}, {pages}, {date:yyyy-MM-dd} ...;
+ * see `Schema.splitFieldTokens()`). `{blocks: []}` is the empty band a first or
+ * even variant uses to blank its page (and what read() returns for one); this
+ * engine writes no `{blocks}` band with content.
+ */
+export interface PageBand {
+  left?: string;
+  center?: string;
+  right?: string;
+  /** Points; 9 by default. */
+  size?: number;
+  /** #RRGGBB; #6B7280 by default. */
+  color?: string;
+  blocks?: Block[];
+}
+
 /** Section geometry. Margins are POINTS. */
 export interface Page {
   size?: PageSize;
   orientation?: Orientation;
   margins?: PageMargins;
+  /** Every page; with a firstHeader every page but the first, with an evenHeader the odd pages. */
+  header?: PageBand;
+  footer?: PageBand;
+  /** The first page only (Word's "Different first page"). */
+  firstHeader?: PageBand;
+  firstFooter?: PageBand;
+  /** Even pages (Word's "Different odd and even pages"). */
+  evenHeader?: PageBand;
+  evenFooter?: PageBand;
+}
+
+/**
+ * Document properties beyond the title, which is the top-level `title`
+ * (`dc:title`): there is deliberately no `meta.title`.
+ */
+export interface DocMeta {
+  /** docProps/core.xml dc:creator: Word's Author, and what an {author} field shows. */
+  author?: string;
+}
+
+/** One field token in header/footer text: `Schema.splitFieldTokens()`. */
+export interface FieldToken {
+  /** The token as written, e.g. `{date:yyyy-MM-dd}`. */
+  token: string;
+  /** Its name: page, pages, section, sectionpages, author, title, filename, date, time. */
+  name: string;
+  /** The Word field instruction without its surrounding spaces, e.g. `DATE \@ "yyyy-MM-dd"`. */
+  instruction: string;
 }
 
 export interface Doc {
+  /** docProps/core.xml dc:title, and what a {title} field in a header or footer shows. */
   title?: string;
+  meta?: DocMeta;
   blocks: Block[];
   page?: Page;
   /** Font every run inherits unless it names its own. */

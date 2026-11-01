@@ -105,6 +105,42 @@ const FOOTNOTE_READ_DOC = {
   ],
 };
 
+/**
+ * First / even bands, every field token and `meta.author` (PHP 0.16.0), on a
+ * body of plain paragraphs only, so EVERY part must match PHP -- document.xml,
+ * each header and footer part, settings, core and both rels; see the
+ * dedicated test.
+ */
+const BAND_VARIANTS_DOC = {
+  title: "Board memo",
+  meta: { author: "Ada & Lovelace" },
+  page: {
+    margins: { left: 54, right: 54 },
+    header: { left: "Board memo | continued", right: "Printed {date} at {time}" },
+    footer: { left: "{author} | {title}", center: "Section {section} of {sectionpages}", right: "Page {page} of {pages}", size: 8 },
+    firstHeader: { left: "BOARD MEMO", right: "{date:d MMMM yyyy}", color: "#1F3A5F", size: 11 },
+    firstFooter: { blocks: [] },
+    evenHeader: { left: "{filename}", right: "{time:HH:mm} {Date} {foo}" },
+    evenFooter: { center: "Even {page}" },
+  },
+  blocks: [
+    { type: "paragraph", runs: [{ text: "Literal in the body: {page} {date} {author}." }] },
+    { type: "paragraph", runs: [{ text: "Second paragraph." }] },
+  ],
+};
+
+/** A blank first page with no default of that kind: asks for nothing. Footer variants only; header untouched. */
+const BAND_EDGES_DOC = {
+  meta: { author: "Only an author" },
+  page: {
+    footer: { right: "{page}" },
+    firstFooter: { left: "" },
+    firstHeader: { blocks: [] },
+    evenHeader: { left: "Even only" },
+  },
+  blocks: [{ type: "paragraph", runs: [{ text: "Body" }] }],
+};
+
 const DOCS: Record<string, unknown> = {
   /** The floor: if this diverges, nothing below is worth reading. */
   minimal: {
@@ -229,6 +265,10 @@ const DOCS: Record<string, unknown> = {
    * this document must match -- document.xml included; see the dedicated test.
    */
   footnotes: FOOTNOTE_DOC,
+
+  /** First / even bands, every field token and meta.author (PHP 0.16.0). */
+  bandVariants: BAND_VARIANTS_DOC,
+  bandEdges: BAND_EDGES_DOC,
 };
 
 /**
@@ -466,6 +506,49 @@ describe.skipIf(!HAS_PHP)("cross-engine writer parity (PHP vs TS)", () => {
     for (const part of ["word/document.xml", "word/footnotes.xml", "word/_rels/footnotes.xml.rels", "word/settings.xml", "word/_rels/document.xml.rels"]) {
       expect(dec.decode(tsParts[part]!), part).toBe(dec.decode(phpParts[part]!));
     }
+  });
+
+  it.each([
+    ["bandVariants", BAND_VARIANTS_DOC],
+    ["bandEdges", BAND_EDGES_DOC],
+  ])("emits every part of a first/even-band, field and meta document exactly as PHP does: %s", (name, doc) => {
+    const { phpParts, tsParts } = writeBoth(`${name}-strict`, doc);
+    const dec = new TextDecoder();
+    const bandParts = Object.keys(phpParts).filter((p) => /^word\/(header|footer)\d+\.xml$/.test(p));
+
+    // The document must have exercised what it is here for.
+    if (name === "bandVariants") {
+      expect(bandParts.sort()).toEqual([
+        "word/footer1.xml",
+        "word/footer2.xml",
+        "word/footer3.xml",
+        "word/header1.xml",
+        "word/header2.xml",
+        "word/header3.xml",
+      ]);
+      expect(dec.decode(phpParts["word/document.xml"]!)).toContain("<w:titlePg/>");
+      expect(dec.decode(phpParts["word/settings.xml"]!)).toContain("<w:evenAndOddHeaders/>");
+      expect(dec.decode(phpParts["docProps/core.xml"]!)).toContain("<dc:creator>");
+    }
+    expect(Object.keys(tsParts).sort(), "the two engines wrote different part sets").toEqual(Object.keys(phpParts).sort());
+    for (const part of [...bandParts, "word/document.xml", "word/settings.xml", "docProps/core.xml", "_rels/.rels", "word/_rels/document.xml.rels"]) {
+      if (phpParts[part] === undefined) continue;
+      expect(dec.decode(tsParts[part]!), part).toBe(dec.decode(phpParts[part]!));
+    }
+  });
+
+  it.each([
+    ["bandVariants", BAND_VARIANTS_DOC],
+    ["bandEdges", BAND_EDGES_DOC],
+  ])("reads PHP's first/even bands, fields and meta back to the same document: %s", (name, doc) => {
+    const docFile = join(dir, `${name}-read.json`);
+    const phpOut = join(dir, `${name}-read.php.docx`);
+    writeFileSync(docFile, JSON.stringify(doc));
+    php([PHP_SCRIPT, docFile, phpOut]);
+
+    const fromPhp = Agent.read(new Uint8Array(readFileSync(phpOut)));
+    expect(fromPhp).toStrictEqual(Agent.read(Agent.toBytes(doc as never)));
+    if (name === "bandVariants") expect(fromPhp).toEqual(doc);
   });
 
   it("reads PHP's footnotes back to the same document, links, lists and tables included", () => {

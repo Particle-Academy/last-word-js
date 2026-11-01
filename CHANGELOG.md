@@ -7,6 +7,122 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-01
+
+**What you must do: nothing, unless you want first or even bands, the new
+header/footer fields or `meta.author`.** With no variant band, no `meta` and
+none of the new tokens, every document writes exactly what 0.12.0 wrote, part
+for part. Two read-side changes and one write-side change can touch an existing
+document; see Changed. Mirrors PHP `particle-academy/last-word` 0.16.0, less the
+letterhead option (see Notes). Pre-1.0: a minor release may carry breaking
+changes, and this one carries none that need action.
+
+### Added
+
+- **First-page and even-page bands: `page.firstHeader`, `page.firstFooter`,
+  `page.evenHeader`, `page.evenFooter`** (MOIC, 2026-11-01), each the same
+  shape as `page.header`. `page.header` stays "every page"; with a
+  `firstHeader` it is every page but the first, with an `evenHeader` the odd
+  pages. A kind with no variant shows its default on those pages too. An empty
+  variant (`{"blocks": []}`, or a band with no text) blanks that page when the
+  kind has a default band, and asks for nothing otherwise. Written as Word's
+  `first` / `even` header references (`w:titlePg`, `w:evenAndOddHeaders` in
+  settings), parts numbered by slot: `{kind}1.xml` default (unchanged),
+  `{kind}2.xml` first, `{kind}3.xml` even, ids `rId{Kind}N`. `read()` returns
+  them from any producer: a first (even) variant only while `w:titlePg`
+  (`w:evenAndOddHeaders`) is on, never one naming the default's own part, and
+  `{"blocks": []}` for a missing or empty variant part while the default has
+  content. Footnotes stay refused in every band. Every header, footer, settings
+  and document part is byte-identical to PHP's (pinned by the parity suite).
+- **Field tokens in header and footer text**: `{section}`, `{sectionpages}`,
+  `{author}`, `{title}`, `{filename}`, `{date}`, `{time}`, and
+  `{date:FORMAT}` / `{time:FORMAT}` with a Word date-time picture (one or more
+  characters, none of `{`, `}`, `"` or a backslash), beside `{page}` /
+  `{pages}`. Each is a live complex field, written by the same code `{page}`
+  already used, instruction between single spaces (` DATE \@ "FORMAT" ` for a
+  picture). The cached result is deterministic: `1` for page and section
+  numbers; `meta.author` and the `title` for AUTHOR and TITLE (empty without
+  one); no result run for DATE, TIME and FILENAME (no clock: the same document
+  still writes the same bytes). Without a picture, DATE and TIME show in the
+  reader's locale. Anything else in braces stays literal, and every token stays
+  literal in the body. `read()` returns any producer's field as its token,
+  matching the first word in any case, keeping a `\@` picture the grammar can
+  hold and dropping every other switch. `Schema.FIELD_TOKEN`,
+  `Schema.FIELD_INSTRUCTIONS`, `Schema.splitFieldTokens()` and
+  `Schema.fieldTokenOf()` are the grammar.
+- **`meta.author`**: `docProps/core.xml` `dc:creator`, written after `dc:title`
+  and read back (an empty `dc:creator` reads as no `meta`). The title stays the
+  top-level `title`; there is no `meta.title` (validation refuses it and
+  `validateAndRepair` moves it to `title`, or drops it when there is one), so
+  `dc:title` has one slot.
+- `Schema.PAGE_BANDS` / `Schema.PAGE_BAND_SLOTS`; the JSON schema's `meta`,
+  the four variants and a `blankBand` definition; types `PageBand`, `DocMeta`,
+  `FieldToken`, and `Page.header` ... `Page.evenFooter`.
+- Agent guide: the first-page band, the letterhead option and the field tokens
+  (the guide's bytes and hash changed; the PHP and Python packages carry the
+  same bytes). New sha256:
+  `6d70d774cf630c0c40813d70ddd00191cc8a0b57a2cd3c603cae54f64a9501fa`.
+
+### Changed
+
+- **`read()` of a document with `w:titlePg` on, or `w:evenAndOddHeaders` on,
+  now returns `firstHeader` / `firstFooter` / `evenHeader` / `evenFooter`.**
+  Before, only the default band was read and the first/even ones were lost.
+  Consumer action: none to keep working; a document read and written back now
+  keeps its different first page. If you compared `page` keys exactly, expect
+  the new ones.
+- **`read()` of a SECTIONPAGES field now returns `{sectionpages}`** (it was
+  `{pages}`). Consumer action: none; in a one-section document both show the
+  same number, and writing `{sectionpages}` back writes SECTIONPAGES again.
+- **A header or footer whose text already contained one of the new tokens
+  literally** (say `{date}`) now writes a live field there. Consumer action:
+  only if you meant the braces literally; write `{Date}` or another non-token
+  spelling.
+- `docProps/core.xml` declaring a DOCTYPE is no longer read for the title (or
+  the author), as in PHP.
+
+### Fixed
+
+- A field that is not a token, in a one-line header or footer from another
+  producer (a STYLEREF, say), lost its cached result on read; it now keeps it
+  as text. A `w:fldSimple` that is not a token keeps its text too.
+
+### Notes
+
+- **Not here, because of what this engine does not have yet:**
+  - **`templateFirstPageOnly`** (PHP 0.16.0, the house letterhead on the first
+    page only). It moves the header and footer that `templateParts` carries
+    from a template's section (PHP 0.13.0, last-word#5); this engine takes a
+    template's styles and theme only, so the option has nothing to act on. It is
+    not in `WriteOptions`, and passing it changes nothing (pinned by a test).
+  - **A `{blocks}` header or footer with content** (PHP 0.14.0, last-word#6) is
+    still not written: as a first or even variant it is ignored (the default
+    shows on that page), as a `{blocks}` `header` always was here; and the
+    tokens in a blocks band's run text are not written either. The empty
+    `{"blocks": []}` variant IS written (a blank page). Reading, a band is still
+    its first paragraph's text, so a first or even part with none there (an
+    image-only letterhead) reads as `{"blocks": []}` while the default has
+    content, where PHP returns its blocks.
+  - The agent guide is shared bytes and so mentions both; an agent following it
+    on this engine gets the one-line forms only.
+  - Validation paths keep this package's JSON-Pointer form (`/meta/title`,
+    `/page/firstFooter/left`).
+- `@particle-academy/fancy-conformance` (devDependency) moves to `^0.41.0`:
+  `last-word/docx-constructs` rows 0054-0079 pin the letterhead option, the band
+  variants, the field tokens and `meta`, with the new functions `bandParts`,
+  `bandFields` and `coreProps` and a row input of `{doc, template?, options?}`
+  (the template is a document model, written and passed as the template).
+  15 of the 26 pass here; the other 11 are skipped by this package's harness,
+  each with its reason printed in the run: 0054-0060 need `templateParts`, and
+  0061, 0064, 0065 and 0069 write a `{blocks}` band. A skipped row that starts
+  passing fails the build until its skip is removed. Dev only; nothing at
+  runtime depends on it.
+- LibreOffice 26 renders a three-page document written by this package with its
+  first-page header on page one only (no footer there, from an empty
+  `firstFooter`), the even header on page two and the default on page three, and
+  computes PAGE, NUMPAGES, AUTHOR, TITLE and a pictured DATE on load. It shows
+  SECTIONPAGES as its cached `1` rather than computing it.
+
 ## [0.12.0] - 2026-11-01
 
 **What you must do: nothing, unless you want footnotes or the header/footer
@@ -79,6 +195,7 @@ file that has no footnotes and default header/footer distances. Mirrors PHP
   contract for all three engines, with the new `footnotesPart` extractor. Dev
   only; nothing at runtime depends on it.
 
+## [0.11.0] - 2026-10-27
 
 ### Added
 

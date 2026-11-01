@@ -47,7 +47,7 @@ const markdown = Agent.toMarkdown(imported);
 
 ## The document model
 
-A `Doc` is `{ title?, blocks }`. Blocks are JSON-friendly discriminated
+A `Doc` is `{ title?, meta?, page?, blocks }`. Blocks are JSON-friendly discriminated
 unions — exactly what an agent emits:
 
 | Block | Shape |
@@ -114,6 +114,53 @@ things: the header at `header` from the top, the body from `top`, the footer's
 last line at `footer` from the bottom, footnotes at the foot of the body (above
 `bottom`); Word pushes the body down when a header is taller than `top - header`
 leaves room for, and up when a footer is.
+
+### Headers, footers and the first page
+
+`page.header` / `page.footer` are one line with three slots:
+`{ left?, center?, right?, size?, color? }` (9pt grey by default).
+`page.firstHeader` / `page.firstFooter` replace them on the first page only
+(Word's "Different first page"); `page.evenHeader` / `page.evenFooter` on even
+pages (Word's "Different odd and even pages"), making `header` / `footer` the
+odd pages'. A kind with no variant shows its default on those pages too, and
+`{ "blocks": [] }` (or a band with no text) leaves that page blank when the kind
+has a default:
+
+```jsonc
+"page": {
+  "firstHeader": { "left": "ACME LTD", "right": "{date:d MMMM yyyy}" },
+  "header": { "left": "Acme | Proposal 42", "right": "Page {page} of {pages}" },
+  "firstFooter": { "blocks": [] },
+  "footer": { "left": "{author}", "right": "{title}" }
+}
+```
+
+Parts are numbered by slot: `{kind}1.xml` the default, `2` the first page, `3`
+even pages, with `w:titlePg` / `w:evenAndOddHeaders` set accordingly. `read()`
+returns the variants from any producer while the switch that makes Word show
+them is on.
+
+Band text takes live Word fields: `{page}`, `{pages}`, `{section}`,
+`{sectionpages}`, `{author}` (`meta.author`), `{title}` (the document `title`),
+`{filename}`, `{date}` and `{time}` in the reader's locale, or
+`{date:FORMAT}` / `{time:FORMAT}` with a Word picture (`{date:yyyy-MM-dd}`,
+`{time:HH:mm}`). Names are lower-case and exact; anything else in braces is
+literal, and in the body every token is literal. The cached result is
+deterministic: `1` for the page and section numbers, the author and title for
+AUTHOR and TITLE, nothing for DATE, TIME and FILENAME. `Schema.splitFieldTokens()`
+and `Schema.fieldTokenOf()` are the grammar.
+
+`meta: { author }` is `docProps/core.xml` `dc:creator`. The title stays the
+top-level `title` (`dc:title`); there is no `meta.title`, which validation
+refuses and `validateAndRepair` moves to `title`.
+
+> **Where this engine differs from PHP.** It writes no `{blocks}` header or
+> footer with content (PHP 0.14.0): a variant like that is ignored, as a
+> `{blocks}` `header` always was here. And it takes a template's styles and
+> theme only, never its header/footer section (`templateParts`, PHP 0.13.0), so
+> the PHP option `templateFirstPageOnly` (the house letterhead on page one only)
+> has nothing to act on: it is not in `WriteOptions`, and passing it changes
+> nothing.
 
 ## API
 

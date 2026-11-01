@@ -8,6 +8,7 @@ import { Xml } from "../helpers/xml";
 import { DocxTemplate } from "./docx-template";
 import { parseDataUrl, sniffImageSize } from "../helpers/image-size";
 import type { Block, Doc, ListItem, Run } from "../schema/types";
+import { Schema } from "../schema/schema";
 import { zipSync, type ZipFile } from "../zip";
 import { isPlainObject } from "../util";
 import { DEFAULT_ASPECT, chartSpec, chartTitle } from "../helpers/chart";
@@ -168,25 +169,22 @@ function band(spec: unknown): Band | null {
   return { left, center, right, size, color: hex(s.color) ?? "6B7280" };
 }
 
-/**
- * Text with `{page}` / `{pages}` as live PAGE / NUMPAGES fields, written as
- * COMPLEX fields so every piece carries the band's formatting (see PHP).
- */
-function bandRuns(text: string, rPr: string): string {
-  let out = "";
-  for (const piece of text.split(/(\{page\}|\{pages\})/).filter((p) => p !== "")) {
-    const instr = piece === "{page}" ? "PAGE" : piece === "{pages}" ? "NUMPAGES" : null;
-    out +=
-      instr === null
-        ? `<w:r>${rPr}<w:t xml:space="preserve">${Xml.text(piece)}</w:t></w:r>`
-        : `<w:r>${rPr}<w:fldChar w:fldCharType="begin"/></w:r>` +
-          `<w:r>${rPr}<w:instrText xml:space="preserve"> ${instr} </w:instrText></w:r>` +
-          `<w:r>${rPr}<w:fldChar w:fldCharType="separate"/></w:r>` +
-          `<w:r>${rPr}<w:t>1</w:t></w:r>` +
-          `<w:r>${rPr}<w:fldChar w:fldCharType="end"/></w:r>`;
-  }
-  return out;
+/** PHP's trim(): only " \t\n\r\0\x0B", not JavaScript's wider whitespace. */
+function phpTrim(s: string): string {
+  return s.replace(/^[ \t\n\r\0\x0B]+|[ \t\n\r\0\x0B]+$/g, "");
 }
+
+/** A band slot key's Word reference type and the part number it is written as. */
+const BAND_SLOTS = [
+  ["default", 1],
+  ["first", 2],
+  ["even", 3],
+] as const;
+
+type BandKind = "header" | "footer";
+type BandType = (typeof BAND_SLOTS)[number][0];
+
+const capitalise = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
 /** `<w:shd>` — the one spelling used for runs, paragraphs and cells alike. */
 function shadingXml(color: unknown): string {
@@ -394,8 +392,27 @@ export class DocxWriter {
   /** Twips between the page margins; set from `page` before any block renders. */
   private contentWidth = 9360;
 
-  /** The running header / footer parts this document asked for, in write order. */
-  private bands: { kind: "header" | "footer"; xml: string }[] = [];
+  /**
+   * The document's own running headers and footers, as finished parts, in
+   * write order: `name` is `{kind}{n}`, numbered by SLOT -- 1 the default
+   * (`page.header`), 2 the first page (`page.firstHeader`), 3 even pages
+   * (`page.evenHeader`) -- written as `word/{name}.xml` with relationship id
+   * `rId{Kind}{n}`. Empty when none were asked for, and then nothing about the
+   * package changes. Mirrors PHP `DocxWriter::$bands` (0.16.0).
+   */
+  private bands: { name: string; kind: BandKind; xml: string }[] = [];
+
+  /** `w:titlePg`: the document has a first-page band of its own. */
+  private titlePg = false;
+
+  /** `w:evenAndOddHeaders` (settings): the document has an even-page band of its own. */
+  private evenAndOdd = false;
+
+  /** The cached result an AUTHOR field gets: `meta.author`, or "". */
+  private fieldAuthor = "";
+
+  /** The cached result a TITLE field gets: the document `title`, or "". */
+  private fieldTitle = "";
 
   /**
    * The document's footnotes: `w:footnote` content (without the wrapper),
@@ -429,7 +446,7 @@ export class DocxWriter {
    * One paragraph: left, TAB, centre, TAB, right, against a centre tab stop at
    * half the content width and a right one at its edge.
    */
-  private bandXml(kind: "header" | "footer", spec: Band): string {
+  private bandXml(kind: BandKind, spec: Band): string {
     const rPr = `<w:rPr><w:color w:val="${spec.color}"/><w:sz w:val="${halfPoints(spec.size)}"/></w:rPr>`;
     const tag = kind === "header" ? "w:hdr" : "w:ftr";
     return (
@@ -439,14 +456,129 @@ export class DocxWriter {
       `<w:tab w:val="center" w:pos="${Math.trunc(this.contentWidth / 2)}"/>` +
       `<w:tab w:val="right" w:pos="${this.contentWidth}"/>` +
       `</w:tabs><w:spacing w:before="0" w:after="0"/></w:pPr>` +
-      bandRuns(spec.left, rPr) +
+      this.bandRuns(spec.left, rPr) +
       `<w:r>${rPr}<w:tab/></w:r>` +
-      bandRuns(spec.center, rPr) +
+      this.bandRuns(spec.center, rPr) +
       `<w:r>${rPr}<w:tab/></w:r>` +
-      bandRuns(spec.right, rPr) +
+      this.bandRuns(spec.right, rPr) +
       `</w:p>` +
       `</${tag}>`
     );
+  }
+
+  /**
+   * Text with its field tokens (`Schema.FIELD_TOKEN`) as live fields: `{page}`
+   * PAGE, `{pages}` NUMPAGES, `{date:yyyy-MM-dd}` DATE with its picture, and the
+   * rest. Anything else is literal text. COMPLEX fields, so every piece carries
+   * the band's formatting (see PHP `DocxWriter::bandRuns()`).
+   */
+  private bandRuns(text: string, rPr: string): string {
+    let out = "";
+    for (const piece of Schema.splitFieldTokens(text)) {
+      out +=
+        typeof piece === "string"
+          ? `<w:r>${rPr}<w:t xml:space="preserve">${Xml.text(piece)}</w:t></w:r>`
+          : this.fieldRuns(piece.name, piece.instruction, `<w:r>${rPr}`);
+    }
+    return out;
+  }
+
+  /**
+   * One field token as a complex field, every piece opened with `open` (`<w:r>`
+   * and the run's properties): begin, the instruction between single spaces
+   * (` DATE \@ "yyyy-MM-dd" `), separate, the cached result, end.
+   *
+   * The cached result is the value when the writer knows it and nothing when
+   * it does not -- never a guess, and never the clock, which would make the same
+   * document write different bytes: `1` for PAGE, NUMPAGES, SECTION and
+   * SECTIONPAGES; the author and the title for AUTHOR and TITLE (empty without
+   * one); and no result run at all for DATE, TIME and FILENAME. Mirrors PHP
+   * `DocxWriter::fieldRuns()`.
+   */
+  private fieldRuns(name: string, instruction: string, open: string): string {
+    const result =
+      name === "page" || name === "pages" || name === "section" || name === "sectionpages"
+        ? "1"
+        : name === "author"
+          ? this.fieldAuthor
+          : name === "title"
+            ? this.fieldTitle
+            : "";
+    const preserve = result !== phpTrim(result) ? ` xml:space="preserve"` : "";
+    return (
+      `${open}<w:fldChar w:fldCharType="begin"/></w:r>` +
+      `${open}<w:instrText xml:space="preserve"> ${Xml.text(instruction)} </w:instrText></w:r>` +
+      `${open}<w:fldChar w:fldCharType="separate"/></w:r>` +
+      (result !== "" ? `${open}<w:t${preserve}>${Xml.text(result)}</w:t></w:r>` : "") +
+      `${open}<w:fldChar w:fldCharType="end"/></w:r>`
+    );
+  }
+
+  /**
+   * An empty header or footer part: a first or even page with no band, when the
+   * document's own default band would otherwise show there. Byte-identical to
+   * PHP's `blankBandXml()` (no `r` namespace: it has nothing to reference).
+   */
+  private static blankBandXml(kind: BandKind): string {
+    const tag = kind === "header" ? "w:hdr" : "w:ftr";
+    return Xml.declaration() + `<${tag} xmlns:w="${NS_W}"><w:p/></${tag}>`;
+  }
+
+  /**
+   * The document's own header and footer slots (PHP 0.16.0): parts by slot,
+   * their relationships, `w:titlePg` / `w:evenAndOddHeaders`, and the section's
+   * references -- default, first, even within a kind, header before footer.
+   *
+   * An empty first or even band (`{"blocks": []}`, or a band with no text)
+   * blanks that page when the kind has a default band, and is nothing
+   * otherwise. With a switch on, a kind with no part for those pages references
+   * its default there, so a footer is never lost from page one by adding a
+   * first-page header. A `{blocks}` band with content is a band this engine does
+   * not write (PHP 0.14.0, last-word#6), and asks for nothing here, as it always
+   * has for `header` / `footer`.
+   */
+  private buildBands(pageSpec: Any): string {
+    this.bands = [];
+    const own: Record<BandKind, Partial<Record<BandType, string>>> = { header: {}, footer: {} };
+    for (const kind of ["header", "footer"] as const) {
+      for (const [type, n] of BAND_SLOTS) {
+        const key = type === "default" ? kind : `${type}${capitalise(kind)}`;
+        const raw = pageSpec[key];
+        const spec = band(raw);
+        let xml: string | null = spec !== null ? this.bandXml(kind, spec) : null;
+        const blocks = isPlainObject(raw) ? (raw as Any).blocks : undefined;
+        const asksForNothing = (isPlainObject(raw) || Array.isArray(raw)) && !(Array.isArray(blocks) && blocks.length > 0);
+        if (xml === null && type !== "default" && asksForNothing && own[kind].default !== undefined) {
+          xml = DocxWriter.blankBandXml(kind);
+        }
+        if (xml !== null) {
+          const name = `${kind}${n}`;
+          const id = `rId${capitalise(name)}`;
+          this.bands.push({ name, kind, xml });
+          this.rels.push({ id, type: `${REL_BASE}/${kind}`, target: `${name}.xml`, external: false });
+          own[kind][type] = id;
+        }
+      }
+    }
+
+    this.titlePg = own.header.first !== undefined || own.footer.first !== undefined;
+    this.evenAndOdd = own.header.even !== undefined || own.footer.even !== undefined;
+
+    let references = "";
+    for (const kind of ["header", "footer"] as const) {
+      const slots = { ...own[kind] };
+      if (this.titlePg && slots.first === undefined && slots.default !== undefined) slots.first = slots.default;
+      if (this.evenAndOdd && slots.even === undefined && slots.default !== undefined) slots.even = slots.default;
+      for (const [type] of BAND_SLOTS) {
+        if (slots[type] !== undefined) references += `<w:${kind}Reference w:type="${type}" r:id="${slots[type]}"/>`;
+      }
+    }
+    return references;
+  }
+
+  /** settings.xml is written only when something needs it: even/odd headers, or footnotes. */
+  private hasSettings(): boolean {
+    return this.evenAndOdd || this.footnotes.length > 0;
   }
 
   /**
@@ -483,45 +615,48 @@ export class DocxWriter {
     const page = pageGeometry((doc as Any).page);
     this.contentWidth = page.w - page.left - page.right;
 
-    // Running header / footer: built before any block, so their rels sit after
+    // meta.author (PHP 0.16.0) is dc:creator, beside the title in the core
+    // part; a document with neither writes no core part, as before. Both are
+    // also what AUTHOR / TITLE fields in a band show until Word updates them.
+    const meta = (doc as Any).meta;
+    const author = isPlainObject(meta) && typeof (meta as Any).author === "string" && (meta as Any).author !== "" ? ((meta as Any).author as string) : null;
+    const hasTitle = doc.title !== undefined;
+    const hasCore = hasTitle || author !== null;
+    this.fieldAuthor = author ?? "";
+    this.fieldTitle = typeof doc.title === "string" ? doc.title : "";
+
+    // Running headers / footers: built before any block, so their rels sit after
     // styles/numbering/theme and before every hyperlink and image -- the order
     // the PHP engine writes them in.
-    this.bands = [];
     const pageSpec = isPlainObject((doc as Any).page) ? (doc as Any).page : {};
-    for (const kind of ["header", "footer"] as const) {
-      const spec = band(pageSpec[kind]);
-      if (spec !== null) {
-        this.bands.push({ kind, xml: this.bandXml(kind, spec) });
-        this.rels.push({ id: `rId${kind === "header" ? "Header" : "Footer"}1`, type: `${REL_BASE}/${kind}`, target: `${kind}1.xml`, external: false });
-      }
-    }
+    const references = this.buildBands(pageSpec);
 
     const body = this.renderBlocks(doc.blocks ?? [], {});
     const documentXml =
       Xml.declaration() +
       `<w:document xmlns:w="${NS_W}" xmlns:r="${NS_R}" xmlns:wp="${NS_WP}" xmlns:a="${NS_A}" xmlns:pic="${NS_PIC}">` +
-      `<w:body>${body}${this.sectPr(page)}</w:body></w:document>`;
+      `<w:body>${body}${this.sectPr(page, references)}</w:body></w:document>`;
 
     const files: ZipFile[] = [
-      { name: "[Content_Types].xml", data: encode(this.contentTypesXml(doc)) },
-      { name: "_rels/.rels", data: encode(this.packageRelsXml(doc)) },
+      { name: "[Content_Types].xml", data: encode(this.contentTypesXml(hasCore)) },
+      { name: "_rels/.rels", data: encode(this.packageRelsXml(hasCore)) },
     ];
-    if (doc.title !== undefined) {
-      files.push({ name: "docProps/core.xml", data: encode(this.coreXml(String(doc.title))) });
+    if (hasCore) {
+      files.push({ name: "docProps/core.xml", data: encode(this.coreXml(hasTitle ? String(doc.title) : null, author)) });
     }
     files.push(
       { name: "word/document.xml", data: encode(documentXml) },
       { name: "word/styles.xml", data: encode(this.stylesXml(doc)) },
       { name: "word/numbering.xml", data: encode(this.numberingXml()) },
     );
-    if (this.footnotes.length > 0) {
+    if (this.hasSettings()) {
       files.push({ name: "word/settings.xml", data: encode(this.settingsXml()) });
     }
     if (this.template?.hasTheme() === true) {
       files.push({ name: "word/theme/theme1.xml", data: encode(this.template.theme()!) });
     }
     for (const b of this.bands) {
-      files.push({ name: `word/${b.kind}1.xml`, data: encode(b.xml) });
+      files.push({ name: `word/${b.name}.xml`, data: encode(b.xml) });
     }
     if (this.footnotes.length > 0) {
       files.push({ name: "word/footnotes.xml", data: encode(this.footnotesXml()) });
@@ -812,13 +947,15 @@ export class DocxWriter {
 
   /**
    * The settings part, written only when something needs it: in this engine,
-   * footnotes. The footnotePr names the two separator footnotes, as Word itself
+   * even/odd headers or footnotes. CT_Settings is a sequence: evenAndOddHeaders
+   * precedes footnotePr, which names the two separator footnotes, as Word itself
    * writes it.
    */
   private settingsXml(): string {
     return (
       Xml.declaration() +
       `<w:settings xmlns:w="${NS_W}">` +
+      (this.evenAndOdd ? `<w:evenAndOddHeaders/>` : "") +
       (this.footnotes.length > 0 ? `<w:footnotePr><w:footnote w:id="-1"/><w:footnote w:id="0"/></w:footnotePr>` : "") +
       `</w:settings>`
     );
@@ -1080,21 +1217,20 @@ export class DocxWriter {
 
   // ── Parts ─────────────────────────────────────────────────────────────────
 
-  private sectPr(page: PageGeometry): string {
+  private sectPr(page: PageGeometry, references: string): string {
     const orient = page.orientation === "landscape" ? ` w:orient="landscape"` : "";
-    // References FIRST: the schema orders them before w:pgSz.
-    const refs = this.bands
-      .map((b) => `<w:${b.kind}Reference w:type="default" r:id="rId${b.kind === "header" ? "Header" : "Footer"}1"/>`)
-      .join("");
+    // References FIRST: the schema orders them before w:pgSz. CT_SectPr is a
+    // sequence, and w:titlePg comes after w:pgMar.
     return (
-      `<w:sectPr>${refs}<w:pgSz w:w="${page.w}" w:h="${page.h}"${orient}/>` +
+      `<w:sectPr>${references}<w:pgSz w:w="${page.w}" w:h="${page.h}"${orient}/>` +
       `<w:pgMar w:top="${page.top}" w:right="${page.right}" w:bottom="${page.bottom}" w:left="${page.left}"` +
       ` w:header="${page.header}" w:footer="${page.footer}" w:gutter="0"/>` +
+      (this.titlePg ? `<w:titlePg/>` : "") +
       `</w:sectPr>`
     );
   }
 
-  private contentTypesXml(doc: Doc): string {
+  private contentTypesXml(hasCore: boolean): string {
     const exts = [...new Set(this.media.map((m) => m.ext))].sort();
     let defaults =
       `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
@@ -1109,7 +1245,7 @@ export class DocxWriter {
       `<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>` +
       `<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>` +
       `<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>`;
-    if (this.footnotes.length > 0) {
+    if (this.hasSettings()) {
       overrides += `<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>`;
     }
     if (this.template?.hasTheme() === true) {
@@ -1118,7 +1254,7 @@ export class DocxWriter {
       overrides += `<Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>`;
     }
     for (const b of this.bands) {
-      overrides += `<Override PartName="/word/${b.kind}1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${b.kind}+xml"/>`;
+      overrides += `<Override PartName="/word/${b.name}.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${b.kind}+xml"/>`;
     }
     if (this.footnotes.length > 0) {
       overrides += `<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>`;
@@ -1126,7 +1262,7 @@ export class DocxWriter {
     this.charts.forEach((_, i) => {
       overrides += `<Override PartName="/word/charts/chart${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>`;
     });
-    if (doc.title !== undefined) {
+    if (hasCore) {
       overrides += `<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>`;
     }
     return (
@@ -1135,9 +1271,9 @@ export class DocxWriter {
     );
   }
 
-  private packageRelsXml(doc: Doc): string {
+  private packageRelsXml(hasCore: boolean): string {
     let rels = `<Relationship Id="rId1" Type="${REL_DOCUMENT}" Target="word/document.xml"/>`;
-    if (doc.title !== undefined) {
+    if (hasCore) {
       rels += `<Relationship Id="rId2" Type="${REL_CORE}" Target="docProps/core.xml"/>`;
     }
     return (
@@ -1146,13 +1282,20 @@ export class DocxWriter {
     );
   }
 
-  private coreXml(title: string): string {
+  /**
+   * docProps/core.xml: dc:title, and (PHP 0.16.0) dc:creator for
+   * `meta.author`, title first. Each only when there is one, so a title-only
+   * document's part is byte-for-byte what it always was. Deterministic: no
+   * dcterms created/modified timestamps.
+   */
+  private coreXml(title: string | null, author: string | null): string {
     return (
       Xml.declaration() +
       `<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" ` +
       `xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" ` +
       `xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">` +
-      `<dc:title>${Xml.text(title)}</dc:title>` +
+      (title !== null ? `<dc:title>${Xml.text(title)}</dc:title>` : "") +
+      (author !== null ? `<dc:creator>${Xml.text(author)}</dc:creator>` : "") +
       `</cp:coreProperties>`
     );
   }
@@ -1165,8 +1308,10 @@ export class DocxWriter {
   private documentRelsXml(): string {
     const fixed = [REL_STYLES, REL_NUMBERING, REL_THEME];
     const parts: Rel[] = [];
-    if (this.footnotes.length > 0) {
+    if (this.hasSettings()) {
       parts.push({ id: "rIdSettings", type: REL_SETTINGS, target: "settings.xml", external: false });
+    }
+    if (this.footnotes.length > 0) {
       parts.push({ id: "rIdFootnotes", type: REL_FOOTNOTES, target: "footnotes.xml", external: false });
     }
     return this.relsXml([

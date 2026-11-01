@@ -278,6 +278,24 @@ export class Validator {
       errors.push(err("/title", "Doc title must be a string."));
     }
 
+    // `meta` (PHP 0.16.0): an object whose `author` is text. The title is the
+    // top-level `title`, not `meta.title` -- one slot for dc:title, so the two
+    // cannot disagree; repair moves a `meta.title` there. An empty JSON array
+    // is PHP's empty object too.
+    if (doc.meta !== undefined) {
+      const meta = doc.meta;
+      if (!isPlainObject(meta) && !(Array.isArray(meta) && meta.length === 0)) {
+        errors.push(err("/meta", "Doc `meta` must be an object ({author?})."));
+      } else if (isPlainObject(meta)) {
+        if ("author" in meta && typeof (meta as Any).author !== "string") {
+          errors.push(err("/meta/author", "Doc `meta.author` must be text (docProps/core.xml dc:creator)."));
+        }
+        if ("title" in meta) {
+          errors.push(err("/meta/title", 'The document title is the top-level "title", not meta.title.'));
+        }
+      }
+    }
+
     if (doc.defaultFont !== undefined && typeof doc.defaultFont !== "string") {
       errors.push(err("/defaultFont", "Doc `defaultFont` must be a font family name."));
     }
@@ -304,7 +322,7 @@ export class Validator {
             );
           }
         }
-        for (const kind of ["header", "footer"] as const) {
+        for (const kind of Schema.PAGE_BANDS) {
           const band = doc.page[kind];
           if (band === undefined || band === null) continue;
           if (!isPlainObject(band)) {
