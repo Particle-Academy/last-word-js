@@ -1,8 +1,7 @@
-import { declaresDoctype } from "../reader/part-xml";
+import { decodePart, partIsRefused } from "../reader/part-xml";
 import { unzipSync } from "../zip";
 import { TemplateException } from "../exceptions";
 
-const DECODER = new TextDecoder();
 
 /**
  * A `.dotx` / `.docx` opened for the parts that carry its LOOK.
@@ -73,14 +72,14 @@ export class DocxTemplate {
       );
     }
 
-    const stylesXml = DECODER.decode(styles);
+    const stylesXml = decodePart(styles);
     const theme = parts["word/theme/theme1.xml"];
-    const themeXml = theme === undefined || theme.length === 0 ? null : DECODER.decode(theme);
+    const themeXml = theme === undefined || theme.length === 0 ? null : decodePart(theme);
 
     // These parts are copied into the output unchanged, so they get the refusal a
     // read part gets: a Word package never legitimately carries a DOCTYPE.
-    for (const [what, xml] of [["styles", stylesXml], ["theme", themeXml]] as const) {
-      if (xml !== null && declaresDoctype(xml)) {
+    for (const [what, xml] of [["styles", styles], ["theme", theme]] as const) {
+      if (xml !== undefined && xml.length > 0 && partIsRefused(xml)) {
         throw new TemplateException(`The template's ${what} part declares a DOCTYPE, which is refused.`);
       }
     }

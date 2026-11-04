@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { Agent, unzipSync, zipSync } from "../src";
+import { Agent, OfficeTemplateRefused, unzipSync, zipSync } from "../src";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -163,5 +163,63 @@ describe("every XML part goes through the gate", () => {
       copy[part] = ENCODINGS[encoding]!(withDoctype(text(template[part]!)));
       expect(() => Agent.toBytes({ blocks: [] } as Any, { template: zip(copy) } as Any), encoding).toThrow(/DOCTYPE/);
     }
+  });
+});
+
+describe("the package's own declaration", () => {
+  const declaringMacros = (): Record<string, string | Uint8Array> => {
+    const parts = docx();
+    parts["[Content_Types].xml"] = text(parts["[Content_Types].xml"]!).replace(
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+      "application/vnd.ms-word.template.macroEnabledTemplate.main+xml",
+    );
+    return parts;
+  };
+
+  it("refuses a macro template as it always did, so the case below is the same package", () => {
+    expect(() => Agent.read(zip(declaringMacros()))).toThrow(OfficeTemplateRefused);
+  });
+
+  it.each(Object.keys(ENCODINGS))("%s: refuses the package when its declaration carries a DOCTYPE", (encoding) => {
+    const parts = declaringMacros();
+    parts["[Content_Types].xml"] = ENCODINGS[encoding]!(withDoctype(text(parts["[Content_Types].xml"]!)));
+    let thrown: Any;
+    try {
+      Agent.read(zip(parts));
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(OfficeTemplateRefused);
+    expect(thrown.reason).toBe("refused_declaration");
+  });
+
+  it("refuses an encoding this port cannot read, which would otherwise declare nothing", () => {
+    const parts = declaringMacros();
+    parts["[Content_Types].xml"] = declare(text(parts["[Content_Types].xml"]!), "UTF-7");
+    expect(() => Agent.read(zip(parts))).toThrow(OfficeTemplateRefused);
+  });
+
+  it("leaves a merely malformed declaration as it was", () => {
+    const parts = docx();
+    parts["[Content_Types].xml"] = "<Types>";
+    expect(count(read(parts))).toBe(CLEAN);
+  });
+});
+
+describe("what the parser takes from a part", () => {
+  it.each(PARTS.flatMap((part) => ["UTF-16LE with a BOM", "UTF-16BE with a BOM", "UTF-16LE without a BOM"].map((encoding) => [part, encoding] as const)))(
+    "%s, %s: reads a clean part in its true encoding",
+    (part, encoding) => {
+      const parts = docx();
+      parts[part] = ENCODINGS[encoding]!(text(parts[part]!));
+      expect(count(read(parts))).toBe(CLEAN);
+    },
+  );
+
+  it("takes nothing from any other declaration before the root", () => {
+    const parts = docx();
+    const body = text(parts["word/document.xml"]!);
+    parts["word/document.xml"] = withDoctype(body, `<!NOTATION a "><w:document><w:body><w:p><w:r><w:t>${ENTITY}</w:t></w:r></w:p></w:body></w:document>">`);
+    expect(read(parts)).not.toContain(ENTITY);
   });
 });

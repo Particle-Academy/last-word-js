@@ -15,8 +15,48 @@
  * - Each parser (`parseXml` in `xml.ts`, `parseDom` in `odt/xml-dom.ts`) starts here
  *   and refuses a DOCTYPE it meets itself.
  *
- * This port parses text, not bytes, so a part arrives already decoded as UTF-8.
+ * This port parses text, so decode a part through `decodePart`: the check then sees
+ * what the part actually says, whatever encoding it uses.
  */
+
+const UTF8 = new TextDecoder();
+
+/** The encoding a part is written in, or null when this port cannot decode it. */
+function partEncoding(b: Uint8Array): string | null {
+  if (b[0] === 0xff && b[1] === 0xfe) return b[2] === 0 && b[3] === 0 ? null : "utf-16le";
+  if (b[0] === 0xfe && b[1] === 0xff) return "utf-16be";
+  if (b[0] === 0 && b[1] === 0) return null;
+  if (b[0] === 0x3c && b[1] === 0) return b[2] === 0 ? null : "utf-16le";
+  if (b[0] === 0 && b[1] === 0x3c) return "utf-16be";
+  const start = b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf ? 3 : 0;
+  const head = String.fromCharCode(...b.subarray(start, start + 200));
+  const label = /^<\?xml\s[^>]*?encoding\s*=\s*["']([A-Za-z0-9._-]+)["']/.exec(head)?.[1]?.toLowerCase();
+  // Bytes that got this far are not UTF-16, whatever the declaration claims.
+  if (label === undefined || label === "utf-8" || label.startsWith("utf-16") || label === "utf16") return "utf-8";
+  try {
+    new TextDecoder(label);
+    return label;
+  } catch {
+    return null;
+  }
+}
+
+function decodeOrNull(bytes: Uint8Array): string | null {
+  const encoding = partEncoding(bytes);
+  if (encoding === null) return null;
+  return encoding === "utf-8" ? UTF8.decode(bytes) : new TextDecoder(encoding).decode(bytes);
+}
+
+/** A part's text, or "" when this port cannot decode it, which parses as nothing. */
+export function decodePart(bytes: Uint8Array): string {
+  return decodeOrNull(bytes) ?? "";
+}
+
+/** Whether a part is refused, as opposed to merely malformed or fine. */
+export function partIsRefused(bytes: Uint8Array): boolean {
+  const text = decodeOrNull(bytes);
+  return text === null || declaresDoctype(text);
+}
 
 /** A DOCTYPE at this offset. Names are case-sensitive in XML; the check is not, on purpose. */
 function doctypeAt(xml: string, at: number): boolean {
@@ -36,11 +76,6 @@ export function prologDeclaresDoctype(source: string): boolean {
     if (end < 0) return false;
     at = end + close.length;
   }
-}
-
-/** Whether markup outside any element is a DOCTYPE: what a parser asks of the `<!` it has met. */
-export function isDoctype(xml: string, at: number): boolean {
-  return doctypeAt(xml, at);
 }
 
 /**

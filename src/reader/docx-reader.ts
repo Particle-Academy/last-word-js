@@ -13,6 +13,7 @@ import { base64Encode } from "../helpers/image-size";
 import type { Block, Doc, ListItem, Run } from "../schema/types";
 import { SourceArchive } from "../zip/source-archive";
 import { TEMPLATE, sourceKind } from "../zip/office-template";
+import { decodePart } from "./part-xml";
 import { at, el, els, parseXml, type XmlNode } from "./xml";
 import { Schema } from "../schema/schema";
 import { EMU_PER_PX, SDT_TAG_CODE, SDT_TAG_QUOTE, splitColumns, PAGE_SIZES } from "../writer/docx-writer";
@@ -22,7 +23,6 @@ import { DEFAULT_ASPECT } from "../helpers/chart";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
 
-const DECODER = new TextDecoder();
 
 interface RelInfo {
   target: string;
@@ -347,7 +347,7 @@ export class DocxReader {
 
   private partText(name: string): string | null {
     const part = this.parts[name];
-    return part ? DECODER.decode(part) : null;
+    return part ? decodePart(part) : null;
   }
 
   private readTitle(): string | null {

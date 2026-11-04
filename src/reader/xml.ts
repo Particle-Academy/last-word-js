@@ -4,7 +4,7 @@
  * by local name, matching how the PHP reader accesses SimpleXML.
  */
 
-import { isDoctype, prologDeclaresDoctype } from "./part-xml";
+import { prologDeclaresDoctype } from "./part-xml";
 
 export interface XmlNode {
   name: string;
@@ -100,12 +100,9 @@ export function parseXml(src: string): XmlNode | null {
         i = end < 0 ? n : end + 2;
         continue;
       }
-      if (src.startsWith("<!", i)) {
-        if (isDoctype(src, i)) return null;
-        const end = src.indexOf(">", i);
-        i = end < 0 ? n : end + 1;
-        continue;
-      }
+      // Any other declaration is refused rather than skipped to its first ">",
+      // which would read what follows inside it as the document.
+      if (src.startsWith("<!", i)) return null;
       if (src[i + 1] === "/") {
         const end = src.indexOf(">", i);
         if (stack.length > 1) stack.pop();

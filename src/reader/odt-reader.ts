@@ -35,7 +35,7 @@ import type { Block, Doc } from "../schema/types";
 import { SourceArchive } from "../zip/source-archive";
 import { DOCUMENT, TEMPLATE, sourceKind, type SourceKind } from "../zip/office-template";
 import { isElement, parseDom, textContent, type DomElement } from "./odt/xml-dom";
-import { declaresDoctype } from "./part-xml";
+import { declaresDoctype, decodePart } from "./part-xml";
 import { Structure, clamp, phpInt, phpTrim, type ListEntry } from "./structure";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -46,7 +46,6 @@ const MAX_REPEAT = 1000;
 const MAX_DEPTH = 256;
 const MAX_REPEATED_CELLS = 100_000;
 
-const DECODER = new TextDecoder();
 
 interface RawRun {
   text: string;
@@ -97,7 +96,7 @@ export class OdtReader {
     if (entries["content.xml"] === undefined) throw new Error("ODT archive has no content.xml.");
 
     const parts: Record<string, string> = {};
-    for (const [name, data] of Object.entries(entries)) parts[name] = DECODER.decode(data);
+    for (const [name, data] of Object.entries(entries)) parts[name] = decodePart(data);
     return parts;
   }
 

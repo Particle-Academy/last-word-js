@@ -28,6 +28,7 @@
  */
 import { OfficeTemplateRefused } from "../exceptions";
 import { isElement, parseDom, type DomElement } from "../reader/odt/xml-dom";
+import { decodePart, partIsRefused } from "../reader/part-xml";
 import { crc32 } from "./crc32";
 import { SourceArchive, type ArchiveEntry } from "./source-archive";
 
@@ -163,6 +164,9 @@ export function convert(bytes: Uint8Array, to: SourceKind | null = null): Uint8A
 
 function ooxmlKind(zip: SourceArchive, types: Uint8Array): SourceKind {
   const declared = declarations(types);
+  // Refused rather than read as unparsable: a package that declares nothing is a
+  // plain document, and its declarations go unchecked.
+  if (declared === null && partIsRefused(types)) throw new OfficeTemplateRefused("refused_declaration");
   // Unparsable content types were never looked at before; the reader's own
   // handling of the package is unchanged.
   if (declared === null) return DOCUMENT;
@@ -350,7 +354,7 @@ function rebuild(zip: SourceArchive, replacements: Map<string, Uint8Array>): Uin
 /** Strict parse; null when the part is absent, empty, carries a DOCTYPE or does not parse. */
 function dom(xml: Uint8Array | string | null): DomElement | null {
   if (xml === null) return null;
-  const text = typeof xml === "string" ? UTF8.decode(fromLatin1(xml)) : UTF8.decode(xml);
+  const text = decodePart(typeof xml === "string" ? fromLatin1(xml) : xml);
   if (text === "") return null;
   try {
     return parseDom(text);

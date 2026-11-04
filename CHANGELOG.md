@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TemplateException`, and any other part reads as absent. **Consumer action:** none; no
   Word or ODF file has a DOCTYPE. A part that merely mentions the word in its text is no
   longer refused.
+- A package whose `[Content_Types].xml` declares a DOCTYPE, or is in an encoding this port
+  cannot read, is refused whole, with `OfficeTemplateRefused` reason
+  `refused_declaration`, as a macro-enabled template is. **Consumer action:** none, unless
+  you branch on `reason`. A merely malformed one reads as it did.
+
+### Fixed
+
+- Parts are read in their true encoding (UTF-16, or what the XML declaration names),
+  as the PHP and Python packages read them, and the parser refuses any `<!` declaration
+  instead of skipping to its first `>`.
 
 ## [0.15.0] - 2026-11-03
 

@@ -17,6 +17,7 @@ const TEMPLATE_MESSAGES: Record<string, string> = {
   not_convertible: "This package has no single content-type declaration that can be rewritten.",
   odf_mimetype: "An OpenDocument package must store its mimetype entry first and uncompressed.",
   bad_target: 'The conversion target must be "document" or "template".',
+  refused_declaration: "This package's content types declare a DOCTYPE, or cannot be read, so what it declares cannot be checked.",
 };
 
 /**
@@ -31,6 +32,8 @@ const TEMPLATE_MESSAGES: Record<string, string> = {
  * - `not_convertible` there is no single declaration that can be rewritten.
  * - `odf_mimetype`    an ODF package whose `mimetype` is not first and stored.
  * - `bad_target`      the conversion target is not `document` or `template`.
+ * - `refused_declaration`  its `[Content_Types].xml` declares a DOCTYPE or cannot be
+ *                     read, so what it declares cannot be checked.
  *
  * Branch on `reason`; the message is for people.
  */
