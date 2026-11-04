@@ -52,7 +52,7 @@
         "human-plus"
     ],
     "devDependencies": {
-        "@particle-academy/fancy-conformance": "^0.41.0",
+        "@particle-academy/fancy-conformance": "^0.44.0",
         "@types/node": "^22",
         "tsup": "^8.5.0",
         "typescript": "^5.8.0",
