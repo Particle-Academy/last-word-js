@@ -330,6 +330,26 @@ function applySkips(summary: RunSummary): { summary: RunSummary; nowPassing: str
   };
 }
 
+/**
+ * The last-word half of `doc-model/page-refusal`: the same messages as PHP.
+ * Messages only: Node's paths are JSON Pointers, and the suite says so.
+ */
+describe("fancy-conformance: doc-model/page-refusal", () => {
+  it("satisfies the last-word half of every row", () => {
+    const { cases } = loadSuite("doc-model/page-refusal");
+    const failed: string[] = [];
+    for (const row of cases) {
+      const doc = (row.input as { doc: unknown }).doc;
+      const want = (row.expected as { lastWord: { messages?: string[]; repairOk: boolean } }).lastWord;
+      const got: { repairOk: boolean; messages?: string[] } = { repairOk: Agent.validateAndRepair(doc).ok };
+      if (want.messages !== undefined) got.messages = Agent.validate(doc).map((e) => e.message);
+      if (!deepEquals(got, want)) failed.push(`${row.id} expected ${JSON.stringify(want)} got ${JSON.stringify(got)}`);
+    }
+    expect(failed).toEqual([]);
+    expect(cases.length).toBeGreaterThanOrEqual(18);
+  });
+});
+
 describe("fancy-conformance: last-word/docx-constructs", () => {
   it("runs every row in the shared table", () => {
     const { summary, nowPassing } = applySkips(runTable(SUITE, extract, { language: "node" }));
