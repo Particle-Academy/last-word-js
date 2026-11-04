@@ -322,7 +322,7 @@ export function layoutRows(rows: Any[]): { laid: Slot[][]; colCount: number } {
 
       if (next < authored.length) {
         const cell = authored[next++];
-        const span = Math.max(1, Math.trunc(Number(cell.colSpan) || 1));
+        const span = Math.max(1, Math.min(Schema.MAX_COL_SPAN, Math.trunc(Number(cell.colSpan) || 1)));
         const rowSpan = Math.max(1, Math.trunc(Number(cell.rowSpan) || 1));
         line.push({ cell, span, vMerge: rowSpan > 1 ? "restart" : null, shading: cell.shading ?? null });
         if (rowSpan > 1) pending.set(col, { rows: rowSpan - 1, span, shading: cell.shading ?? null });

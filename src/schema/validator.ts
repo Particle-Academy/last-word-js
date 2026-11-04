@@ -481,6 +481,8 @@ export class Validator {
               for (const span of ["colSpan", "rowSpan"] as const) {
                 if (cell[span] !== undefined && (!Number.isInteger(cell[span]) || cell[span] < 1)) {
                   errors.push(err(`${cellPath}/${span}`, `Cell \`${span}\` must be an integer of 1 or more.`));
+                } else if (span === "colSpan" && cell.colSpan > Schema.MAX_COL_SPAN) {
+                  errors.push(err(`${cellPath}/colSpan`, `Cell \`colSpan\` must be at most ${Schema.MAX_COL_SPAN}.`));
                 }
               }
               if (!Array.isArray(cell.blocks)) {

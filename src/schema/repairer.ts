@@ -442,6 +442,13 @@ export class Repairer {
             return { blocks: [{ type: "paragraph", runs: [{ text: cell }] }] };
           }
           cell.blocks = this.repairBlocks(cell.blocks ?? [], `${path}/rows/${r}/cells/${c}/blocks`);
+          if (Number.isInteger(cell.colSpan) && cell.colSpan > Schema.MAX_COL_SPAN) {
+            this.notes.push({
+              path: `${path}/rows/${r}/cells/${c}/colSpan`,
+              message: `Clamped colSpan ${cell.colSpan} to ${Schema.MAX_COL_SPAN}.`,
+            });
+            cell.colSpan = Schema.MAX_COL_SPAN;
+          }
           return cell;
         });
       out.push(row);

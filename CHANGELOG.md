@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**What you must do: only if you write a table cell with a `colSpan` above 1000.**
+That is far past what Word itself makes (Microsoft documents 63 columns). `validate()`
+now refuses it and ``validateAndRepair()`` clamps it to 1000 with a note and keeps the text. Every other
+document writes exactly what it did, byte for byte.
+
+### Added
+
+- `Schema.MAX_COL_SPAN` (1000), also the `maximum` of `colSpan` in `jsonSchema()`.
+
+### Changed
+
+- **BREAKING: `colSpan` above 1000 is a validation error**
+  (``Cell `colSpan` must be at most 1000.``). **Consumer action:** none unless you
+  write such a span; `validateAndRepair()` clamps it. `rowSpan` has no ceiling:
+  nothing costs more than the rows that exist.
+
+### Fixed
+
+- The `.docx` reader truncates a fractional `w:gridSpan` and treats a negative one
+  as 1, as PHP and Python always have, so what it returns validates.
+
+### Security
+
+- A table cell's column span had no upper limit, so a very small document could
+  cost memory out of proportion to its size in `toBytes()` and `write()`. The
+  validator, the repairer, the writer and the `.docx` reader now all hold it to
+  1000. Reading a `.docx` clamps and keeps the text; it never refuses for this.
+  **Consumer action:** upgrade, especially if you accept documents or `.docx` files
+  from users or agents.
+
 ## [0.14.0] - 2026-11-03
 
 **What you must do: only if your documents carry `pageBreak.orientation`,

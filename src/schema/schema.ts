@@ -27,6 +27,15 @@ export const Schema = {
   MAX_HEADING_LEVEL: 6,
 
   /**
+   * The most columns one table cell may span. Columns are what a span costs: the
+   * writer makes work per grid column, so without a ceiling a few bytes of JSON
+   * could ask for any amount of it. 1000 is the limit HTML puts on `colspan` and
+   * the one this package's `.odt` reader and fine-print already use. `rowSpan`
+   * has no ceiling because nothing costs more than the rows that exist.
+   */
+  MAX_COL_SPAN: 1000,
+
+  /**
    * Block types a footnote's `blocks` refuse, at any depth: a page break means
    * nothing at the foot of a page, and a chart's parts are wired to the body.
    * (`portable` is listed for parity with PHP; this engine has no portable
@@ -458,7 +467,7 @@ export const Schema = {
                         borders: { $ref: "#/definitions/boxBorders" },
                         padding: { $ref: "#/definitions/boxSides" },
                         valign: { type: "string", enum: ["top", "center", "bottom"] },
-                        colSpan: { type: "integer", minimum: 1 },
+                        colSpan: { type: "integer", minimum: 1, maximum: this.MAX_COL_SPAN },
                         rowSpan: {
                           type: "integer",
                           minimum: 1,

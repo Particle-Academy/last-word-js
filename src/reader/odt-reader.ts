@@ -30,6 +30,7 @@
  * is walked with a depth limit.
  */
 
+import { Schema } from "../schema/schema";
 import type { Block, Doc } from "../schema/types";
 import { SourceArchive } from "../zip/source-archive";
 import { DOCUMENT, TEMPLATE, sourceKind, type SourceKind } from "../zip/office-template";
@@ -242,7 +243,7 @@ export class OdtReader {
           const out: Any = { blocks: this.blocks(cell, depth + 1) };
           const colSpan = phpInt(cell.attrs.get("table:number-columns-spanned"));
           const rowSpan = phpInt(cell.attrs.get("table:number-rows-spanned"));
-          if (colSpan > 1) out.colSpan = Math.min(colSpan, MAX_REPEAT);
+          if (colSpan > 1) out.colSpan = Math.min(colSpan, Schema.MAX_COL_SPAN);
           if (rowSpan > 1) out.rowSpan = Math.min(rowSpan, MAX_REPEAT);
           const repeat = Math.max(1, Math.min(phpInt(cell.attrs.get("table:number-columns-repeated")), MAX_REPEAT));
           cells.push(out);

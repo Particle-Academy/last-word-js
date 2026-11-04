@@ -888,7 +888,7 @@ export class DocxReader {
       let col = 0;
       for (const tc of els(tr, "tc")) {
         const tcPr = el(tc, "tcPr");
-        const span = numAttr(el(tcPr, "gridSpan"), "val") ?? 1;
+        const span = Math.max(1, Math.min(Schema.MAX_COL_SPAN, Math.trunc(numAttr(el(tcPr, "gridSpan"), "val") ?? 1)));
         const vMergeEl = el(tcPr, "vMerge");
         const vMerge = vMergeEl ? (at(vMergeEl, "val") ?? "continue") : null;
 
