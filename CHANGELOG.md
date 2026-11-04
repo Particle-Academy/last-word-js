@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-08
+
 ### Security
 
 - **A chart's cached number is read in linear time.** The pattern could backtrack badly on a very long run of digits in a hostile file's chart cache. Every value it read is still read the same. **Consumer action:** none.
