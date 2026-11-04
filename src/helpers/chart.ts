@@ -233,7 +233,7 @@ function positional(exp: string): string {
 /** A cached number back as the model holds it. Only a plain decimal counts; anything else is 0. */
 export function chartParseNum(text: string): number {
   const t = text.trim();
-  const v = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(t) ? Number(t) : 0;
+  const v = /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(t) ? Number(t) : 0;
   return Number.isFinite(v) ? v + 0 : 0;
 }
 
