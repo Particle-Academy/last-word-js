@@ -130,6 +130,9 @@ export class DocxReader {
     const defaults = this.readDocDefaults();
     if (defaults.font !== null) (doc as Any).defaultFont = defaults.font;
     if (defaults.size !== null) (doc as Any).defaultSize = defaults.size;
+    // Never document text: locations and counts only, like the exchange report.
+    const breaks = body ? sectionBreaks(body) : 0;
+    if (breaks > 0) doc.unrepresented = [{ where: "/page", kind: "layout-not-preserved", count: breaks }];
     // A .dotx reads exactly like its .docx twin, and says so.
     if (kind === TEMPLATE) (doc as Any).sourceKind = TEMPLATE;
 
@@ -1008,6 +1011,32 @@ export class DocxReader {
 }
 
 /** Twips between the margins: page width less left and right. Mirrors PHP `contentWidthOf()`. */
+/**
+ * How many section breaks the body holds: paragraphs whose `w:pPr` carries a
+ * `w:sectPr`, in the wrappers PHP takes blocks from. The model has one page setup,
+ * so `page` is the last section's and every other section is lost; a count of them
+ * is reported instead of the loss going unsaid. The body's own final `w:sectPr` is
+ * not a break. A walk, not a recursion: this nesting is attacker-supplied. Mirrors
+ * PHP `DocxReader::sectionBreaks()`.
+ */
+function sectionBreaks(body: XmlNode): number {
+  let count = 0;
+  const stack: XmlNode[] = [body];
+  while (stack.length > 0) {
+    for (const node of stack.pop()!.children) {
+      if (node.name === "p") {
+        if (el(el(node, "pPr"), "sectPr")) count++;
+      } else if (node.name === "customXml") {
+        stack.push(node);
+      } else if (node.name === "sdt") {
+        const content = el(node, "sdtContent");
+        if (content) stack.push(content);
+      }
+    }
+  }
+  return count;
+}
+
 function contentWidthOf(sectPr: XmlNode | undefined): number {
   if (!sectPr) return 9360;
   const num = (v: string | undefined, d: number): number => (v !== undefined && /^-?\d+(\.\d+)?$/.test(v.trim()) ? Math.trunc(Number(v)) : d);

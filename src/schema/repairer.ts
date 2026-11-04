@@ -232,6 +232,9 @@ export class Repairer {
       case "chart":
         return this.repairChart(block, path);
 
+      // A break keeps its keys, `page` and the near-miss ones above all: stripped,
+      // any unrelated repair elsewhere would turn a refused landscape section into
+      // `ok: true` and an all-portrait document.
       case "pageBreak":
       case "hr":
         break;

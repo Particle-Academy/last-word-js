@@ -75,6 +75,32 @@ function checkBorders(value: Any, path: string, label: string, edges: string[]):
 }
 
 /**
+ * A break asking for a different page. A .docx has one page setup until the
+ * writer implements `page`, so it is refused rather than ignored: a document that
+ * silently comes out all portrait looks fine. Repair leaves these keys in place,
+ * so `validateAndRepair` stays `ok: false`. The messages are PHP's, byte for byte
+ * (unlike the rest of this file, which has its own sentence case), so all three
+ * engines say the same thing about this.
+ */
+function validatePageBreak(block: Any, path: string): ValidationError[] {
+  const errors: ValidationError[] = [];
+  if (block.page !== undefined) {
+    errors.push(
+      err(
+        `${path}/page`,
+        "pageBreak.page is not implemented in last-word yet; remove page to keep one page setup, or write this document as a PDF with fine-print",
+      ),
+    );
+  }
+  for (const key of Schema.PAGE_BREAK_NEAR_MISS_KEYS) {
+    if (block[key] !== undefined) {
+      errors.push(err(`${path}/${key}`, `a pageBreak has no ${key} key; use pageBreak.page`));
+    }
+  }
+  return errors;
+}
+
+/**
  * The properties every paragraph-shaped block accepts.
  *
  * Shared by `paragraph`, `heading` and list items, because a heading is a
@@ -272,6 +298,10 @@ export class Validator {
     const errors: ValidationError[] = [];
     if (!isPlainObject(doc)) {
       return [err("/", "Doc must be a JSON object with a `blocks` array.")];
+    }
+
+    if (doc.sections !== undefined) {
+      errors.push(err("/sections", "there is no sections key; use pageBreak.page"));
     }
 
     if (doc.title !== undefined && typeof doc.title !== "string") {
@@ -505,6 +535,9 @@ export class Validator {
         break;
 
       case "pageBreak":
+        errors.push(...validatePageBreak(block, path));
+        break;
+
       case "hr":
         break;
     }

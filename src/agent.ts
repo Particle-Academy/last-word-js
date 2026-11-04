@@ -261,6 +261,17 @@ export const Agent = {
     }
     lines.push(`Words: ${countWords(blocks)}`);
 
+    // What read() flattened, in PHP's words.
+    let sectionBreaks = 0;
+    for (const note of Array.isArray(doc?.unrepresented) ? doc.unrepresented : []) {
+      if (note?.kind === "layout-not-preserved" && Number.isInteger(note.count)) sectionBreaks += note.count;
+    }
+    if (sectionBreaks > 0) {
+      lines.push(
+        `Layout not preserved: ${sectionBreaks} section break${sectionBreaks === 1 ? "" : "s"} flattened into the last section's page setup`,
+      );
+    }
+
     return lines.join("\n");
   },
 

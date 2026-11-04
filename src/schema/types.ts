@@ -343,10 +343,23 @@ export interface FieldToken {
   instruction: string;
 }
 
+/**
+ * What `read()` found in a file and could not represent: locations and counts
+ * only, never document text. Here, `{ where: "/page", kind: "layout-not-preserved",
+ * count }`, one per file, counting the section breaks flattened into one page setup.
+ */
+export interface UnrepresentedNote {
+  where: string;
+  kind: string;
+  count: number;
+}
+
 export interface Doc {
   /** docProps/core.xml dc:title, and what a {title} field in a header or footer shows. */
   title?: string;
   meta?: DocMeta;
+  /** Set by `read()` only; ignored on write. */
+  unrepresented?: UnrepresentedNote[];
   blocks: Block[];
   page?: Page;
   /** Font every run inherits unless it names its own. */
