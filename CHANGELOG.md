@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-03
+
 **What you must do: only if you write a table cell with a `colSpan` above 1000.**
 That is far past what Word itself makes (Microsoft documents 63 columns). `validate()`
 now refuses it and ``validateAndRepair()`` clamps it to 1000 with a note and keeps the text. Every other
