@@ -242,7 +242,7 @@ export class DocxReader {
     if (target === null) return false;
     const name = target.startsWith("/") ? target.replace(/^\/+/, "") : "word/" + target.split("\\").join("/").replace(/^\/+/, "");
     const xml = this.partText(name);
-    if (xml === null || /<!DOCTYPE/i.test(xml)) return false;
+    if (xml === null) return false;
     const node = el(parseXml(xml), "evenAndOddHeaders");
     return node !== undefined && toggleOn(at(node, "val"));
   }
@@ -361,7 +361,7 @@ export class DocxReader {
    */
   private readCoreElement(localName: string): string | null {
     const xml = this.partText("docProps/core.xml");
-    if (!xml || /<!DOCTYPE/i.test(xml)) return null;
+    if (!xml) return null;
     const node = el(parseXml(xml), localName);
     return node ? node.text : null;
   }
@@ -396,7 +396,7 @@ export class DocxReader {
       ? target.replace(/^\/+/, "")
       : "word/" + target.split("\\").join("/").replace(/^\/+/, "");
     const xml = this.partText(name);
-    if (xml === null || /<!DOCTYPE/i.test(xml)) return;
+    if (xml === null) return;
     const root = parseXml(xml);
     if (!root) return;
     for (const node of root.children) {
@@ -409,7 +409,7 @@ export class DocxReader {
 
     const relsName = `word/_rels/${name.split("/").pop()}.rels`;
     const partRels = this.partText(relsName);
-    this.footnoteRels = partRels !== null && !/<!DOCTYPE/i.test(partRels) ? this.loadRels(relsName) : {};
+    this.footnoteRels = partRels !== null ? this.loadRels(relsName) : {};
   }
 
   /**

@@ -10,6 +10,8 @@
  * references. A DOCTYPE is refused before this runs.
  */
 
+import { prologDeclaresDoctype } from "../part-xml";
+
 export interface DomElement {
   /** Qualified name as written, e.g. `text:p`. */
   name: string;
@@ -30,6 +32,7 @@ export function isElement(node: DomNode | undefined): node is DomElement {
 }
 
 export function parseDom(src: string): DomElement {
+  if (prologDeclaresDoctype(src)) throw new Error("markup declarations are not allowed");
   const n = src.length;
   const root: DomElement = { name: "#document", local: "#document", attrs: new Map(), children: [] };
   const stack: DomElement[] = [root];

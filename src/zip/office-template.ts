@@ -351,7 +351,7 @@ function rebuild(zip: SourceArchive, replacements: Map<string, Uint8Array>): Uin
 function dom(xml: Uint8Array | string | null): DomElement | null {
   if (xml === null) return null;
   const text = typeof xml === "string" ? UTF8.decode(fromLatin1(xml)) : UTF8.decode(xml);
-  if (text === "" || /<!DOCTYPE/i.test(text)) return null;
+  if (text === "") return null;
   try {
     return parseDom(text);
   } catch {

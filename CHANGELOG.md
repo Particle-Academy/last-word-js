@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Every XML part of a file, read or carried, now goes through one gate
+  (`reader/part-xml.ts`), which refuses a part declaring a DOCTYPE. A refused part reads as
+  an unparsable one: an ODT part throws as it did, a template part throws
+  `TemplateException`, and any other part reads as absent. **Consumer action:** none; no
+  Word or ODF file has a DOCTYPE. A part that merely mentions the word in its text is no
+  longer refused.
+
 ## [0.15.0] - 2026-11-03
 
 **What you must do: only if you write a table cell with a `colSpan` above 1000.**

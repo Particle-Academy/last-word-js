@@ -35,6 +35,7 @@ import type { Block, Doc } from "../schema/types";
 import { SourceArchive } from "../zip/source-archive";
 import { DOCUMENT, TEMPLATE, sourceKind, type SourceKind } from "../zip/office-template";
 import { isElement, parseDom, textContent, type DomElement } from "./odt/xml-dom";
+import { declaresDoctype } from "./part-xml";
 import { Structure, clamp, phpInt, phpTrim, type ListEntry } from "./structure";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -352,7 +353,7 @@ function push(out: RawRun[], text: string, flags: Record<string, boolean>, link:
 
 function parse(xml: string | undefined, name: string, required: boolean): DomElement | null {
   if (xml === undefined) return null;
-  if (/<!DOCTYPE/i.test(xml)) {
+  if (declaresDoctype(xml)) {
     throw new Error(`ODT part ${name} carries a DOCTYPE, which an ODT never does; refusing to parse it.`);
   }
   try {

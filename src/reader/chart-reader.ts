@@ -18,7 +18,6 @@ export const NS_C = "http://schemas.openxmlformats.org/drawingml/2006/chart";
 const KINDS: Record<string, "bar" | "line" | "pie"> = { barChart: "bar", lineChart: "line", pieChart: "pie" };
 
 export function readChart(xml: string): { option: Record<string, Any>; numberFormat: string | null } | null {
-  if (/<!DOCTYPE/i.test(xml)) return null;
   let root: XmlNode | null;
   try {
     root = parseXml(xml);

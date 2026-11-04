@@ -4,6 +4,8 @@
  * by local name, matching how the PHP reader accesses SimpleXML.
  */
 
+import { isDoctype, prologDeclaresDoctype } from "./part-xml";
+
 export interface XmlNode {
   name: string;
   attrs: Record<string, string>;
@@ -72,7 +74,9 @@ function parseTag(inner: string): { name: string; attrs: Record<string, string> 
   return { name, attrs };
 }
 
+/** The part's root element, or null when it is empty or refused: see `part-xml.ts`. */
 export function parseXml(src: string): XmlNode | null {
+  if (prologDeclaresDoctype(src)) return null;
   let i = 0;
   const n = src.length;
   const root: XmlNode = { name: "#root", attrs: {}, children: [], text: "" };
@@ -97,6 +101,7 @@ export function parseXml(src: string): XmlNode | null {
         continue;
       }
       if (src.startsWith("<!", i)) {
+        if (isDoctype(src, i)) return null;
         const end = src.indexOf(">", i);
         i = end < 0 ? n : end + 1;
         continue;
