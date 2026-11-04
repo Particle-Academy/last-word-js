@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import canonical from "../test/fixtures/canonical.json";
@@ -445,6 +445,7 @@ describe.skipIf(!HAS_PHP)("cross-engine ops parity (PHP vs TS)", () => {
     const file = join(dir, "cases.json");
     writeFileSync(file, JSON.stringify(cases.map(({ a, b, ops, hunks }) => (hunks ? { hunks } : ops !== undefined ? { a, ops } : { a, b }))));
     results = JSON.parse(php([PHP_SCRIPT, file]).toString("utf8"));
+    rmSync(dir, { recursive: true, force: true });
   }, 300_000);
 
   it("answers every case", () => {

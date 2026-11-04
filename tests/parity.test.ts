@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { afterAll, describe, it, expect, beforeAll } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, unzipSync } from "../src";
@@ -396,6 +396,7 @@ describe.skipIf(!HAS_PHP)("cross-engine writer parity (PHP vs TS)", () => {
   beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), "last-word-parity-"));
   });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
   const writeBoth = (name: string, doc: unknown) => {
     const docFile = join(dir, `${name}.json`);

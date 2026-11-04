@@ -428,6 +428,7 @@ function libreOffice(bin: string, input: string, format: string, outDir: string)
   const url = "file:///" + profile.split(String.fromCharCode(92)).join("/").replace(/^\/+/, "");
   const result = spawnSync(bin, [`-env:UserInstallation=${url}`, "--headless", "--norestore",
     "--convert-to", format, "--outdir", outDir, input], { encoding: "utf8", timeout: 120_000 });
+  rmSync(profile, { recursive: true, force: true });
   const base = input.split(/[/\\]/).pop()!.replace(/\.[^.]+$/, "");
   const out = join(outDir, `${base}.${format.split(":")[0]}`);
   expect(result.status, result.stderr).toBe(0);

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The test suite no longer leaves its parity folders and LibreOffice profiles in the temp folder. Nothing about the package changes.
+
 **What you must do: only if you read a `.docx` with more than one section, or wrote a page key straight on a break.** Otherwise a document writes exactly what it did, byte for byte, and reads what it did.
 
 ### Added
