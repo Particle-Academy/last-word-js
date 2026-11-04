@@ -1,3 +1,4 @@
+import { isPlainObject } from "../util";
 /**
  * Schema constants describing the Doc shape. Mirrors PHP `Schema\Schema`.
  */
@@ -5,6 +6,38 @@ import { SUPPORTED_CHART_TYPES } from "../helpers/chart";
 import type { FieldToken, ResolvedPageMargins } from "./types";
 
 const isFiniteNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+/** One run of pages of one setup: see `Schema.stretches()`. */
+export interface Stretch {
+  doc: Record<string, unknown>;
+  blocks: unknown[];
+  break: number | null;
+  origins: Record<string, string>;
+}
+
+/**
+ * A break's `page` over the page before it: margins side by side, every other key
+ * replaced whole, the first-page bands never carried over. A background has no place
+ * on a break (validation refuses it) and is ignored here.
+ */
+function mergePage(page: Record<string, unknown>, change: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...page };
+  delete out.firstHeader;
+  delete out.firstFooter;
+  for (const [key, value] of Object.entries(change)) {
+    if (value === undefined || value === null || key === "background") continue;
+    if (key === "margins" && isPlainObject(value) && isPlainObject(out.margins)) {
+      const merged: Record<string, unknown> = { ...(out.margins as Record<string, unknown>) };
+      for (const [side, v] of Object.entries(value as Record<string, unknown>)) {
+        if (v !== null && v !== undefined) merged[side] = v;
+      }
+      out.margins = merged;
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
 
 export const Schema = {
   VERSION: "0.1.0",
@@ -200,6 +233,60 @@ export const Schema = {
     };
   },
 
+  /** Whether a break's `page` is a page object: `{}`, which PHP decodes to `[]`, is one. */
+  isPageObject(page: unknown): boolean {
+    return isPlainObject(page) || (Array.isArray(page) && page.length === 0);
+  },
+
+  /**
+   * The document's runs of pages of one setup, in order: what is before the first
+   * `pageBreak` carrying a `page`, then what follows each one. Word calls each a
+   * section. A plain break, or one nested in a quote or a table cell, starts no
+   * stretch. Mirrors PHP `Schema::stretches()`.
+   *
+   * Each has `doc` (the document as that stretch sees it: `page` merged, no
+   * `blocks`), `blocks`, `break` (the index of the break that starts it, null for the
+   * first) and `origins`: a band key => where it was set, so two stretches holding the
+   * same band can be told from two that were merely given equal ones.
+   */
+  stretches(doc: unknown): Stretch[] {
+    const source = (isPlainObject(doc) ? doc : {}) as Record<string, unknown>;
+    const blocks = Array.isArray(source.blocks) ? source.blocks : [];
+    let page = isPlainObject(source.page) ? (source.page as Record<string, unknown>) : null;
+    const origins: Record<string, string> = {};
+    for (const key of this.PAGE_BANDS) origins[key] = `page.${key}`;
+
+    const stretch = (current: unknown[], at: number | null): Stretch => {
+      const view: Record<string, unknown> = { ...source };
+      delete view.blocks;
+      if (page !== null) view.page = page;
+      return { doc: view, blocks: current, break: at, origins: { ...origins } };
+    };
+
+    const out: Stretch[] = [];
+    let current: unknown[] = [];
+    let at: number | null = null;
+    blocks.forEach((block, i) => {
+      const b = block as { type?: unknown; page?: unknown } | null;
+      if (!isPlainObject(b) || b.type !== "pageBreak" || !this.isPageObject(b.page)) {
+        current.push(block);
+        return;
+      }
+      out.push(stretch(current, at));
+      current = [];
+      at = i;
+      delete origins.firstHeader;
+      delete origins.firstFooter;
+      const change = (isPlainObject(b.page) ? b.page : {}) as Record<string, unknown>;
+      page = mergePage(page ?? {}, change);
+      for (const key of this.PAGE_BANDS) {
+        if (change[key] !== undefined && change[key] !== null) origins[key] = `/blocks/${i}/page/${key}`;
+      }
+    });
+    out.push(stretch(current, at));
+    return out;
+  },
+
   docRequiredKeys(): string[] {
     return ["blocks"];
   },
@@ -208,6 +295,39 @@ export const Schema = {
     const hex = { type: "string", pattern: "^#[0-9a-fA-F]{6}$" };
     const points = { type: "number", description: "Points." };
     const borderRef = { $ref: "#/definitions/border" };
+    const pageProps: Record<string, unknown> = {
+            size: { type: "string", enum: [...this.PAGE_SIZES] },
+            orientation: { type: "string", enum: ["portrait", "landscape"] },
+            margins: { $ref: "#/definitions/pageMargins" },
+            header: {
+              $ref: "#/definitions/band",
+              description: "A running header on every page. With a firstHeader, every page but the first; with an evenHeader, the odd pages.",
+            },
+            footer: {
+              $ref: "#/definitions/band",
+              description:
+                "A running footer on every page -- where a multi-page document carries its page numbers. With a firstFooter, every page but the first; with an evenFooter, the odd pages.",
+            },
+            firstHeader: {
+              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blankBand" }],
+              description:
+                'The header of the FIRST page only, in place of header there (Word\'s "Different first page"): a title-page header, a plainer one after. {"blocks": []} leaves page one with no header when header is set.',
+            },
+            firstFooter: {
+              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blankBand" }],
+              description:
+                'The footer of the first page only, in place of footer there. Without it the footer is on the first page too. {"blocks": []} leaves page one with no footer when footer is set.',
+            },
+            evenHeader: {
+              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blankBand" }],
+              description:
+                'The header of even pages (Word\'s "Different odd and even pages"); header is then the odd pages\'. For a bound, two-sided document.',
+            },
+            evenFooter: {
+              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blankBand" }],
+              description: "The footer of even pages; footer is then the odd pages'. Without it the footer is on even pages too.",
+            },
+          };
     const fill = (keys: string[], value: unknown): Record<string, unknown> =>
       Object.fromEntries(keys.map((k) => [k, value]));
 
@@ -322,39 +442,7 @@ export const Schema = {
           type: "object",
           description:
             "Section geometry. A one-page business document does not fit inside the default one-inch margins.",
-          properties: {
-            size: { type: "string", enum: [...this.PAGE_SIZES] },
-            orientation: { type: "string", enum: ["portrait", "landscape"] },
-            margins: { $ref: "#/definitions/pageMargins" },
-            header: {
-              $ref: "#/definitions/band",
-              description: "A running header on every page. With a firstHeader, every page but the first; with an evenHeader, the odd pages.",
-            },
-            footer: {
-              $ref: "#/definitions/band",
-              description:
-                "A running footer on every page -- where a multi-page document carries its page numbers. With a firstFooter, every page but the first; with an evenFooter, the odd pages.",
-            },
-            firstHeader: {
-              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blankBand" }],
-              description:
-                'The header of the FIRST page only, in place of header there (Word\'s "Different first page"): a title-page header, a plainer one after. {"blocks": []} leaves page one with no header when header is set.',
-            },
-            firstFooter: {
-              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blankBand" }],
-              description:
-                'The footer of the first page only, in place of footer there. Without it the footer is on the first page too. {"blocks": []} leaves page one with no footer when footer is set.',
-            },
-            evenHeader: {
-              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blankBand" }],
-              description:
-                'The header of even pages (Word\'s "Different odd and even pages"); header is then the odd pages\'. For a bound, two-sided document.',
-            },
-            evenFooter: {
-              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blankBand" }],
-              description: "The footer of even pages; footer is then the odd pages'. Without it the footer is on even pages too.",
-            },
-          },
+          properties: pageProps,
         },
         defaultFont: { type: "string", description: "Font every run inherits unless it names its own." },
         defaultSize: {
@@ -430,6 +518,14 @@ export const Schema = {
             // same properties, so a section label can be spaced and aligned
             // without being demoted to a bold paragraph)
             runs: { type: "array", items: { $ref: "#/definitions/run" } },
+            // pageBreak
+            page: {
+              type: "object",
+              additionalProperties: false,
+              description:
+                'Change the page from here on: {"type": "pageBreak", "page": {"orientation": "landscape", "margins": {"left": 28.8, "right": 28.8}}}. Pages after the break keep every setting until another break names a change; portrait does not come back by itself. margins merge side by side, every other key is replaced whole. firstHeader and firstFooter are never inherited: here they mean the first page after this break. {} starts a new stretch with nothing changed. Only on a top-level break, not one in a quote or a table cell. Word: a section break.',
+              properties: pageProps,
+            },
             ...paragraphProps,
             // list
             ordered: { type: "boolean" },

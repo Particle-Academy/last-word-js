@@ -254,21 +254,28 @@ export const Agent = {
       counts[type] = (counts[type] ?? 0) + 1;
     }
 
-    const lines = [`Doc: ${title}`, `Blocks: ${blocks.length}`];
+    const lines = [`Doc: ${title}`];
+    // A document whose page setup changes partway, as fine-print's describe() says it.
+    const stretches = Schema.stretches({ ...doc, blocks });
+    if (stretches.length > 1) {
+      const shapes = stretches.map((s) => ((s.doc.page as Any)?.orientation === "landscape" ? "landscape" : "portrait"));
+      lines.push(`Stretches: ${stretches.length} (${shapes.join(", ")})`);
+    }
+    lines.push(`Blocks: ${blocks.length}`);
     const keys = Object.keys(counts);
     if (keys.length > 0) {
       lines.push("Kinds: " + keys.map((type) => `${counts[type]} ${type}`).join(", "));
     }
     lines.push(`Words: ${countWords(blocks)}`);
 
-    // What read() flattened, in PHP's words.
-    let sectionBreaks = 0;
+    // What read() dropped, in PHP's words.
+    let sectionNotes = 0;
     for (const note of Array.isArray(doc?.unrepresented) ? doc.unrepresented : []) {
-      if (note?.kind === "layout-not-preserved" && Number.isInteger(note.count)) sectionBreaks += note.count;
+      if (note?.kind === "layout-not-preserved" && Number.isInteger(note.count)) sectionNotes += note.count;
     }
-    if (sectionBreaks > 0) {
+    if (sectionNotes > 0) {
       lines.push(
-        `Layout not preserved: ${sectionBreaks} section break${sectionBreaks === 1 ? "" : "s"} flattened into the last section's page setup`,
+        `Layout not preserved: ${sectionNotes} section setting${sectionNotes === 1 ? "" : "s"} dropped (columns, odd or even starts, continuous breaks, page-number restarts, unknown paper)`,
       );
     }
 

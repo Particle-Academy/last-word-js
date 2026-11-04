@@ -251,6 +251,8 @@ export interface ChartBlock {
 
 export interface PageBreakBlock {
   type: "pageBreak";
+  /** Change the page from here on. Word: a section break. See `Schema.stretches()`. */
+  page?: Omit<Page, never>;
 }
 
 export interface HrBlock {

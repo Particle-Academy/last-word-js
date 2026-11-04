@@ -8,7 +8,7 @@ import { Xml } from "../helpers/xml";
 import { DocxTemplate } from "./docx-template";
 import { parseDataUrl, sniffImageSize } from "../helpers/image-size";
 import type { Block, Doc, ListItem, Run } from "../schema/types";
-import { Schema } from "../schema/schema";
+import { Schema, type Stretch } from "../schema/schema";
 import { zipSync, type ZipFile } from "../zip";
 import { isPlainObject } from "../util";
 import { DEFAULT_ASPECT, chartSpec, chartTitle } from "../helpers/chart";
@@ -180,6 +180,15 @@ const BAND_SLOTS = [
   ["first", 2],
   ["even", 3],
 ] as const;
+
+/**
+ * The number the first part of a later stretch takes: past the first stretch's slots,
+ * as PHP's is past a template's (`DocxWriter::LATER_PART_NUMBER`).
+ */
+const LATER_PART_NUMBER = 5;
+
+/** A section break's dedicated paragraph takes as little of the page it ends as Word allows. */
+const SECTION_PARAGRAPH = `<w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/></w:rPr>`;
 
 type BandKind = "header" | "footer";
 type BandType = (typeof BAND_SLOTS)[number][0];
@@ -402,8 +411,17 @@ export class DocxWriter {
    */
   private bands: { name: string; kind: BandKind; xml: string }[] = [];
 
-  /** `w:titlePg`: the document has a first-page band of its own. */
-  private titlePg = false;
+  /** The cached result a SECTION field gets: the number of the stretch the part is written for. */
+  private fieldSection = "1";
+
+  /** Where a band was set and the text width it was drawn at => its part: one part per width, not per stretch. */
+  private bandPartAt = new Map<string, string>();
+
+  /** The empty part a kind's later stretches share. */
+  private blankPart: Partial<Record<BandKind, string>> = {};
+
+  /** The next part number for a later stretch. */
+  private nextPart: Record<BandKind, number> = { header: LATER_PART_NUMBER, footer: LATER_PART_NUMBER };
 
   /** `w:evenAndOddHeaders` (settings): the document has an even-page band of its own. */
   private evenAndOdd = false;
@@ -490,16 +508,18 @@ export class DocxWriter {
    *
    * The cached result is the value when the writer knows it and nothing when
    * it does not -- never a guess, and never the clock, which would make the same
-   * document write different bytes: `1` for PAGE, NUMPAGES, SECTION and
-   * SECTIONPAGES; the author and the title for AUTHOR and TITLE (empty without
+   * document write different bytes: `1` for PAGE, NUMPAGES and SECTIONPAGES, the
+   * section's number for SECTION; the author and the title for AUTHOR and TITLE (empty without
    * one); and no result run at all for DATE, TIME and FILENAME. Mirrors PHP
    * `DocxWriter::fieldRuns()`.
    */
   private fieldRuns(name: string, instruction: string, open: string): string {
     const result =
-      name === "page" || name === "pages" || name === "section" || name === "sectionpages"
+      name === "page" || name === "pages" || name === "sectionpages"
         ? "1"
-        : name === "author"
+        : name === "section"
+          ? this.fieldSection
+          : name === "author"
           ? this.fieldAuthor
           : name === "title"
             ? this.fieldTitle
@@ -525,52 +545,120 @@ export class DocxWriter {
   }
 
   /**
-   * The document's own header and footer slots (PHP 0.16.0): parts by slot,
-   * their relationships, `w:titlePg` / `w:evenAndOddHeaders`, and the section's
-   * references -- default, first, even within a kind, header before footer.
-   *
-   * An empty first or even band (`{"blocks": []}`, or a band with no text)
-   * blanks that page when the kind has a default band, and is nothing
-   * otherwise. With a switch on, a kind with no part for those pages references
-   * its default there, so a footer is never lost from page one by adding a
-   * first-page header. A `{blocks}` band with content is a band this engine does
-   * not write (PHP 0.14.0, last-word#6), and asks for nothing here, as it always
-   * has for `header` / `footer`.
+   * The document's own header and footer slots, for every stretch: parts by slot,
+   * their relationships, `w:evenAndOddHeaders`, and each section's `w:titlePg` and
+   * references -- default, first, even within a kind, header before footer. Mirrors PHP
+   * `buildDocumentXml()`, less its template precedence. Every stretch's parts before
+   * any reference: a later stretch's even band turns even-and-odd on everywhere.
    */
-  private buildBands(pageSpec: Any): string {
+  private buildBands(stretches: Stretch[], geometry: PageGeometry[]): { references: string; titlePg: boolean }[] {
     this.bands = [];
+    this.bandPartAt = new Map();
+    this.blankPart = {};
+    this.nextPart = { header: LATER_PART_NUMBER, footer: LATER_PART_NUMBER };
+    const own = stretches.map((stretch, k) => {
+      const page = geometry[k]!;
+      this.contentWidth = page.w - page.left - page.right;
+      this.fieldSection = String(k + 1);
+      return this.stretchBands(stretch, k);
+    });
+    this.evenAndOdd = own.some((o) => o.header.even !== undefined || o.footer.even !== undefined);
+    const seen: Record<BandKind, Set<BandType>> = { header: new Set(), footer: new Set() };
+    return own.map((o, k) => {
+      const titlePg = o.header.first !== undefined || o.footer.first !== undefined;
+      return { references: this.sectionReferences(k, o, titlePg, seen), titlePg };
+    });
+  }
+
+  /**
+   * One stretch's own parts, kind -> reference type -> rId, in slot order, header before
+   * footer. An empty first or even band (`{"blocks": []}`, or a band with no text) blanks
+   * that page when the kind has a default band, and is nothing otherwise. A `{blocks}`
+   * band with content is a band this engine does not write (PHP 0.14.0, last-word#6), and
+   * asks for nothing here, as it always has for `header` / `footer`.
+   */
+  private stretchBands(stretch: Stretch, k: number): Record<BandKind, Partial<Record<BandType, string>>> {
+    const pageSpec: Any = isPlainObject(stretch.doc.page) ? stretch.doc.page : {};
     const own: Record<BandKind, Partial<Record<BandType, string>>> = { header: {}, footer: {} };
     for (const kind of ["header", "footer"] as const) {
       for (const [type, n] of BAND_SLOTS) {
         const key = type === "default" ? kind : `${type}${capitalise(kind)}`;
-        const raw = pageSpec[key];
-        const spec = band(raw);
-        let xml: string | null = spec !== null ? this.bandXml(kind, spec) : null;
-        const blocks = isPlainObject(raw) ? (raw as Any).blocks : undefined;
-        const asksForNothing = (isPlainObject(raw) || Array.isArray(raw)) && !(Array.isArray(blocks) && blocks.length > 0);
-        if (xml === null && type !== "default" && asksForNothing && own[kind].default !== undefined) {
-          xml = DocxWriter.blankBandXml(kind);
-        }
-        if (xml !== null) {
-          const name = `${kind}${n}`;
-          const id = `rId${capitalise(name)}`;
-          this.bands.push({ name, kind, xml });
-          this.rels.push({ id, type: `${REL_BASE}/${kind}`, target: `${name}.xml`, external: false });
-          own[kind][type] = id;
-        }
+        const name = this.bandPart(k, kind, n, type, pageSpec[key], stretch.origins[key] ?? key, own[kind].default !== undefined);
+        if (name !== null) own[kind][type] = `rId${capitalise(name)}`;
       }
     }
+    return own;
+  }
 
-    this.titlePg = own.header.first !== undefined || own.footer.first !== undefined;
-    this.evenAndOdd = own.header.even !== undefined || own.footer.even !== undefined;
+  /**
+   * The part a stretch's band slot is written to, or null when it asks for nothing. The
+   * first stretch's are numbered by slot, as a document of one stretch has always had
+   * them. A later stretch shares a part only with a stretch whose band was set in the
+   * same place and whose text is the same width, because the part holds tab stops at that
+   * width. A band with a `{section}` token shares with nothing: its cached result is its
+   * number. Mirrors PHP `bandPart()`.
+   */
+  private bandPart(k: number, kind: BandKind, n: number, type: BandType, raw: unknown, origin: string, hasDefault: boolean): string | null {
+    const at = `${origin}|${this.contentWidth}${String(JSON.stringify(raw)).includes("{section}") ? `|${k}` : ""}`;
+    if (k > 0) {
+      const known = this.bandPartAt.get(at);
+      if (known !== undefined) return known;
+    }
+    const name = `${kind}${k === 0 ? n : this.nextPart[kind]}`;
+    const spec = band(raw);
+    let xml: string | null = spec !== null ? this.bandXml(kind, spec) : null;
+    if (xml === null) {
+      const blocks = isPlainObject(raw) ? (raw as Any).blocks : undefined;
+      const asksForNothing = (isPlainObject(raw) || Array.isArray(raw)) && !(Array.isArray(blocks) && blocks.length > 0);
+      if (type === "default" || !asksForNothing || !hasDefault) return null;
+      if (k > 0) return this.blankPartFor(kind);
+      xml = DocxWriter.blankBandXml(kind);
+    }
+    if (k > 0) this.nextPart[kind]++;
+    this.addBand(name, kind, xml);
+    this.bandPartAt.set(at, name);
+    return name;
+  }
 
+  private addBand(name: string, kind: BandKind, xml: string): void {
+    this.bands.push({ name, kind, xml });
+    this.rels.push({ id: `rId${capitalise(name)}`, type: `${REL_BASE}/${kind}`, target: `${name}.xml`, external: false });
+  }
+
+  /** The part a later stretch points at when it shows no band of this kind. */
+  private blankPartFor(kind: BandKind): string {
+    let name = this.blankPart[kind];
+    if (name === undefined) {
+      name = `${kind}${this.nextPart[kind]++}`;
+      this.addBand(name, kind, DocxWriter.blankBandXml(kind));
+      this.blankPart[kind] = name;
+    }
+    return name;
+  }
+
+  /**
+   * One w:sectPr's references. With a switch on, a kind with no part for those pages
+   * references its default there, so a footer is never lost from page one by adding a
+   * first-page header. In a later section Word inherits any reference it leaves out from
+   * the section before, so a band that stretch does not show has to be blanked out loud.
+   */
+  private sectionReferences(k: number, own: Record<BandKind, Partial<Record<BandType, string>>>, titlePg: boolean, seen: Record<BandKind, Set<BandType>>): string {
+    const active: Record<BandType, boolean> = { default: true, first: titlePg, even: this.evenAndOdd };
     let references = "";
     for (const kind of ["header", "footer"] as const) {
       const slots = { ...own[kind] };
-      if (this.titlePg && slots.first === undefined && slots.default !== undefined) slots.first = slots.default;
+      if (titlePg && slots.first === undefined && slots.default !== undefined) slots.first = slots.default;
       if (this.evenAndOdd && slots.even === undefined && slots.default !== undefined) slots.even = slots.default;
       for (const [type] of BAND_SLOTS) {
-        if (slots[type] !== undefined) references += `<w:${kind}Reference w:type="${type}" r:id="${slots[type]}"/>`;
+        if (k > 0 && active[type] && slots[type] === undefined && seen[kind].has(type)) {
+          slots[type] = `rId${capitalise(this.blankPartFor(kind))}`;
+        }
+      }
+      for (const [type] of BAND_SLOTS) {
+        if (slots[type] !== undefined) {
+          references += `<w:${kind}Reference w:type="${type}" r:id="${slots[type]}"/>`;
+          seen[kind].add(type);
+        }
       }
     }
     return references;
@@ -608,13 +696,6 @@ export class DocxWriter {
     this.footnoteHyperlinkIds = new Map();
     this.inFootnote = false;
 
-    // Table grids are laid out against the section's content width, so it has
-    // to be known before any block renders. Carrying 9360 as a literal — which
-    // all three engines did — silently gives a document with narrowed margins
-    // a table that no longer matches its own page.
-    const page = pageGeometry((doc as Any).page);
-    this.contentWidth = page.w - page.left - page.right;
-
     // meta.author (PHP 0.16.0) is dc:creator, beside the title in the core
     // part; a document with neither writes no core part, as before. Both are
     // also what AUTHOR / TITLE fields in a band show until Word updates them.
@@ -628,14 +709,32 @@ export class DocxWriter {
     // Running headers / footers: built before any block, so their rels sit after
     // styles/numbering/theme and before every hyperlink and image -- the order
     // the PHP engine writes them in.
-    const pageSpec = isPlainObject((doc as Any).page) ? (doc as Any).page : {};
-    const references = this.buildBands(pageSpec);
+    const stretches = Schema.stretches(doc);
+    const geometry = stretches.map((stretch) => pageGeometry(stretch.doc.page));
+    const sections = this.buildBands(stretches, geometry);
 
-    const body = this.renderBlocks(doc.blocks ?? [], {});
+    // Table grids are laid out against the section's content width, so it has
+    // to be known before any block renders. Carrying 9360 as a literal — which
+    // all three engines did — silently gives a document with narrowed margins
+    // a table that no longer matches its own page.
+    let body = "";
+    const last = stretches.length - 1;
+    stretches.forEach((stretch, k) => {
+      const page = geometry[k]!;
+      this.contentWidth = page.w - page.left - page.right;
+      const rendered = this.renderBlocks(stretch.blocks as Block[], {});
+      const sectPr = this.sectPr(page, sections[k]!.references, sections[k]!.titlePg);
+      if (k < last) {
+        body += `${rendered}<w:p><w:pPr>${SECTION_PARAGRAPH}${sectPr}</w:pPr></w:p>`;
+      } else {
+        // A last section with nothing in it still needs a paragraph to be a page.
+        body += (k > 0 && rendered === "" ? "<w:p/>" : rendered) + sectPr;
+      }
+    });
     const documentXml =
       Xml.declaration() +
       `<w:document xmlns:w="${NS_W}" xmlns:r="${NS_R}" xmlns:wp="${NS_WP}" xmlns:a="${NS_A}" xmlns:pic="${NS_PIC}">` +
-      `<w:body>${body}${this.sectPr(page, references)}</w:body></w:document>`;
+      `<w:body>${body}</w:body></w:document>`;
 
     const files: ZipFile[] = [
       { name: "[Content_Types].xml", data: encode(this.contentTypesXml(hasCore)) },
@@ -1217,7 +1316,7 @@ export class DocxWriter {
 
   // ── Parts ─────────────────────────────────────────────────────────────────
 
-  private sectPr(page: PageGeometry, references: string): string {
+  private sectPr(page: PageGeometry, references: string, titlePg: boolean): string {
     const orient = page.orientation === "landscape" ? ` w:orient="landscape"` : "";
     // References FIRST: the schema orders them before w:pgSz. CT_SectPr is a
     // sequence, and w:titlePg comes after w:pgMar.
@@ -1225,7 +1324,7 @@ export class DocxWriter {
       `<w:sectPr>${references}<w:pgSz w:w="${page.w}" w:h="${page.h}"${orient}/>` +
       `<w:pgMar w:top="${page.top}" w:right="${page.right}" w:bottom="${page.bottom}" w:left="${page.left}"` +
       ` w:header="${page.header}" w:footer="${page.footer}" w:gutter="0"/>` +
-      (this.titlePg ? `<w:titlePg/>` : "") +
+      (titlePg ? `<w:titlePg/>` : "") +
       `</w:sectPr>`
     );
   }

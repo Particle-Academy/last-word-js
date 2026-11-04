@@ -68,7 +68,19 @@ interface FlatListItem {
 
 interface WalkCtx {
   insideQuote?: boolean;
+  /** The body, or a wrapper it reads through: a section can end here. */
+  topLevel?: boolean;
 }
+
+/** What ending a section does to the blocks: see `planSections()`. */
+interface SectionPlan {
+  break: Record<string, unknown> | null;
+  width: number;
+  dropped: number;
+}
+
+/** Marks where a section ended, among the blocks of a walk, until the walk is finished. */
+const SECTION_END = "#section-end";
 
 export class DocxReader {
   private parts: Record<string, Uint8Array> = {};
@@ -93,6 +105,13 @@ export class DocxReader {
   /** True while a footnote's blocks are read: a reference inside one is ignored. */
   private inFootnote = false;
 
+  private sectionPlan: SectionPlan[] = [];
+
+  private sectionCursor = 0;
+
+  /** The band part a section's reference types name, inherited from the section before. */
+  private sectionTargets: Record<string, Record<string, string>> = { header: {}, footer: {} };
+
   read(bytes: Uint8Array): Doc {
     const source = SourceArchive.open(bytes);
     const kind = sourceKind(source);
@@ -109,11 +128,19 @@ export class DocxReader {
     const root = docXml ? parseXml(docXml) : null;
     const body = el(root, "body");
 
-    // Read before any block, so a chart that spans the column -- the writer's
-    // default -- reads back without a size.
-    this.contentWidth = contentWidthOf(el(body, "sectPr"));
+    // Top-level `page` is the first section, and every later one a break holding what
+    // differs from the page before it. Read before any block, so a chart that spans
+    // the column -- the writer's default -- reads back without a size.
+    const { sections, nested } = body ? sectionsOf(body) : { sections: [undefined], nested: 0 };
+    this.sectionPlan = [];
+    this.sectionCursor = 0;
+    this.sectionTargets = { header: {}, footer: {} };
+    this.contentWidth = contentWidthOf(sections[0]);
+    const page = this.readPage(sections[0]);
+    this.planSections(sections, page ?? {});
+    const unrepresented: { where: string; kind: "layout-not-preserved"; count: number }[] = [];
 
-    const doc: Doc = { blocks: body ? this.walkBody(body.children, {}) : [] };
+    const doc: Doc = { blocks: body ? finishSections(this.walkBody(body.children, { topLevel: true }), unrepresented) : [] };
 
     const title = this.readTitle();
     if (title !== null) doc.title = title;
@@ -125,18 +152,58 @@ export class DocxReader {
     // differ from what the writer produces unasked, for the same reason table
     // options are: a Letter portrait page at one-inch margins is what every
     // document written before `page` existed contains.
-    const page = this.readPage(el(body, "sectPr"));
     if (page !== null) doc.page = page as Any;
     const defaults = this.readDocDefaults();
     if (defaults.font !== null) (doc as Any).defaultFont = defaults.font;
     if (defaults.size !== null) (doc as Any).defaultSize = defaults.size;
     // Never document text: locations and counts only, like the exchange report.
-    const breaks = body ? sectionBreaks(body) : 0;
-    if (breaks > 0) doc.unrepresented = [{ where: "/page", kind: "layout-not-preserved", count: breaks }];
+    const dropped = nested + droppedByFirstSection(sections[0]);
+    if (dropped > 0) unrepresented.push({ where: "/page", kind: "layout-not-preserved", count: dropped });
+    if (unrepresented.length > 0) doc.unrepresented = unrepresented;
     // A .dotx reads exactly like its .docx twin, and says so.
     if (kind === TEMPLATE) (doc as Any).sourceKind = TEMPLATE;
 
     return doc;
+  }
+
+  /**
+   * What ending each section does to the blocks. `w:type` says how a section STARTS, so
+   * the break between sections k-1 and k is decided by section k's type; absent is
+   * nextPage. A continuous section that does not break leaves the model's page as it
+   * was. Mirrors PHP `DocxReader::planSections()`.
+   */
+  private planSections(sections: (XmlNode | undefined)[], first: Record<string, unknown>): void {
+    let current = first;
+    for (const sectPr of sections.slice(1)) {
+      let next = this.readPage(sectPr) ?? {};
+      const knownPaper = paperKnown(sectPr);
+      const change = pageChange(current, next, knownPaper);
+      const type = at(el(sectPr, "type"), "val");
+      const breaks = type !== "continuous" || change.orientation !== undefined || change.size !== undefined;
+      let dropped = 0;
+      if (!breaks) {
+        dropped += 1;
+      } else {
+        dropped += type === undefined || type === "nextPage" || type === "continuous" ? 0 : 1;
+        dropped += columns(sectPr) > 1 ? 1 : 0;
+        if (!knownPaper) {
+          next = { ...next };
+          delete next.size;
+          if (current.size !== undefined) next.size = current.size;
+        }
+        current = next;
+      }
+      dropped += restarts(sectPr, true) ? 1 : 0;
+      dropped += knownPaper ? 0 : 1;
+      this.sectionPlan.push({ break: breaks ? change : null, width: contentWidthOf(sectPr), dropped });
+    }
+  }
+
+  /** The section the top-level walk has just passed the end of, as a marker block. */
+  private endSection(): Block {
+    const plan = this.sectionPlan[this.sectionCursor++];
+    if (plan !== undefined) this.contentWidth = plan.width;
+    return { type: SECTION_END, plan } as unknown as Block;
   }
 
   private readPage(sectPr: XmlNode | undefined): Record<string, unknown> | null {
@@ -190,9 +257,16 @@ export class DocxReader {
   private readBands(sectPr: XmlNode): Record<string, unknown> {
     const titlePgEl = el(sectPr, "titlePg");
     const titlePg = titlePgEl !== undefined && toggleOn(at(titlePgEl, "val"));
+    // A reference a section leaves out is inherited from the section before.
+    for (const kind of ["header", "footer"] as const) {
+      for (const type of ["default", "first", "even"]) {
+        const own = this.bandTarget(sectPr, kind, type);
+        if (own !== null) this.sectionTargets[kind]![type] = own;
+      }
+    }
     const found: Record<string, Record<string, unknown>> = {};
     for (const kind of ["header", "footer"] as const) {
-      const def = this.bandTarget(sectPr, kind, "default");
+      const def = this.sectionTargets[kind]!.default ?? null;
       const band = def !== null ? this.readBandPart(def) : null;
       if (band !== null) found[kind] = band;
       for (const [type, on] of [
@@ -201,7 +275,7 @@ export class DocxReader {
       ] as const) {
         if (!on) continue;
         const key = `${type}${kind === "header" ? "Header" : "Footer"}`;
-        const target = this.bandTarget(sectPr, kind, type);
+        const target = this.sectionTargets[kind]![type] ?? null;
         if (target !== null && target === def) continue;
         let variant: Record<string, unknown> | null = target !== null ? this.readBandPart(target) : null;
         if (variant === null && band !== null) variant = { blocks: [] };
@@ -504,6 +578,13 @@ export class DocxReader {
       switch (node.name) {
         case "p": {
           const kind = this.classifyParagraph(node);
+          const endsSection = ctx.topLevel === true && el(el(node, "pPr"), "sectPr") !== undefined;
+          if (endsSection && kind.kind === "blocks" && kind.blocks.every(holdsNothing)) {
+            // The paragraph that only carries the section break is not the author's.
+            flushAll();
+            blocks.push(this.endSection());
+            break;
+          }
           if (kind.kind === "listItem") {
             flushCode();
             flushQuote();
@@ -525,6 +606,10 @@ export class DocxReader {
             flushAll();
             blocks.push(...kind.blocks);
           }
+          if (endsSection) {
+            flushAll();
+            blocks.push(this.endSection());
+          }
           break;
         }
         case "tbl":
@@ -537,7 +622,7 @@ export class DocxReader {
               (blocks[blocks.length - 2] as Any)?.type === "table") {
             blocks.pop();
           }
-          blocks.push(this.parseTable(node, ctx));
+          blocks.push(this.parseTable(node, { ...ctx, topLevel: false }));
           break;
         case "sdt": {
           flushAll();
@@ -579,7 +664,7 @@ export class DocxReader {
       return [orderCodeKeys(block)];
     }
     if (tag === SDT_TAG_QUOTE) {
-      return [{ type: "quote", blocks: this.walkBody(content.children, { ...ctx, insideQuote: true }) }];
+      return [{ type: "quote", blocks: this.walkBody(content.children, { ...ctx, insideQuote: true, topLevel: false }) }];
     }
     // Unknown SDT: read its content transparently.
     return this.walkBody(content.children, ctx);
@@ -1012,16 +1097,49 @@ export class DocxReader {
 
 /** Twips between the margins: page width less left and right. Mirrors PHP `contentWidthOf()`. */
 /**
- * How many section breaks the body holds: paragraphs whose `w:pPr` carries a
- * `w:sectPr`, in the wrappers PHP takes blocks from. The model has one page setup,
- * so `page` is the last section's and every other section is lost; a count of them
- * is reported instead of the loss going unsaid. The body's own final `w:sectPr` is
- * not a break. A walk, not a recursion: this nesting is attacker-supplied. Mirrors
- * PHP `DocxReader::sectionBreaks()`.
+ * The body's sections in order, each by the `w:sectPr` describing it, the body's own
+ * last; and how many sit inside a code or quote block, which are not read. Through the
+ * same wrappers `walkBody()` reads through. PHP `DocxReader::sections()`.
  */
-function sectionBreaks(body: XmlNode): number {
+function sectionsOf(body: XmlNode): { sections: (XmlNode | undefined)[]; nested: number } {
+  const sections: (XmlNode | undefined)[] = [];
+  let nested = 0;
+  const walk = (nodes: XmlNode[]): void => {
+    for (const node of nodes) {
+      switch (node.name) {
+        case "p": {
+          const sectPr = el(el(node, "pPr"), "sectPr");
+          if (sectPr) sections.push(sectPr);
+          break;
+        }
+        case "tbl":
+        case "sectPr":
+        case "bookmarkStart":
+        case "bookmarkEnd":
+        case "proofErr":
+          break;
+        case "sdt": {
+          const tag = at(el(el(node, "sdtPr"), "tag"), "val") ?? "";
+          const content = el(node, "sdtContent");
+          if (!content) break;
+          if (tag === SDT_TAG_CODE || tag.startsWith(SDT_TAG_CODE + ":") || tag === SDT_TAG_QUOTE) nested += sectionsIn(content);
+          else walk(content.children);
+          break;
+        }
+        default:
+          walk(node.children);
+      }
+    }
+  };
+  walk(body.children);
+  sections.push(el(body, "sectPr"));
+  return { sections, nested };
+}
+
+/** Section breaks at any block level under a node. A walk: this nesting is attacker-supplied. */
+function sectionsIn(root: XmlNode): number {
   let count = 0;
-  const stack: XmlNode[] = [body];
+  const stack: XmlNode[] = [root];
   while (stack.length > 0) {
     for (const node of stack.pop()!.children) {
       if (node.name === "p") {
@@ -1035,6 +1153,82 @@ function sectionBreaks(body: XmlNode): number {
     }
   }
   return count;
+}
+
+/**
+ * Turns the walk's section markers into breaks, each report at the block it belongs to.
+ * The paragraph the writer closes an empty last section with is not the author's either.
+ */
+function finishSections(walked: Block[], unrepresented: { where: string; kind: "layout-not-preserved"; count: number }[]): Block[] {
+  const out: Block[] = [];
+  walked.forEach((block, i) => {
+    if ((block as Any).type !== SECTION_END) {
+      if (isEmptyParagraph(block) && i === walked.length - 1 && (walked[i - 1] as Any)?.type === SECTION_END) return;
+      out.push(block);
+      return;
+    }
+    const plan = (block as Any).plan as SectionPlan | undefined;
+    if (plan === undefined) return;
+    if (plan.dropped > 0) unrepresented.push({ where: `/blocks/${out.length}`, kind: "layout-not-preserved", count: plan.dropped });
+    if (plan.break !== null) out.push({ type: "pageBreak", page: plan.break } as Block);
+  });
+  return out;
+}
+
+/**
+ * What a section changes from the page before it. PHP `pageChange()`: a side is compared
+ * with defaults filled in; a band a section no longer shows is `{"blocks": []}`; the
+ * first-page bands are never inherited, so never compared.
+ */
+function pageChange(from: Record<string, unknown>, to: Record<string, unknown>, knownPaper: boolean): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const orientation = (p: Record<string, unknown>): unknown => p.orientation ?? "portrait";
+  if (orientation(from) !== orientation(to)) out.orientation = orientation(to);
+  const size = (p: Record<string, unknown>): unknown => p.size ?? "letter";
+  if (knownPaper && size(from) !== size(to)) out.size = size(to);
+  const was = (from.margins ?? {}) as Record<string, number>;
+  const now = (to.margins ?? {}) as Record<string, number>;
+  const margins: Record<string, number> = {};
+  // In PHP's order, which the writer reads back the same: top, left, bottom, right.
+  for (const side of ["top", "left", "bottom", "right", "header", "footer"]) {
+    const fallback = side === "header" || side === "footer" ? 36 : 72;
+    const value = now[side] ?? fallback;
+    if ((was[side] ?? fallback) !== value) margins[side] = value;
+  }
+  if (Object.keys(margins).length > 0) out.margins = margins;
+  for (const key of Schema.PAGE_BANDS) {
+    const previous = key === "firstHeader" || key === "firstFooter" ? undefined : (from[key] as Any);
+    const band = to[key];
+    if (band !== undefined && JSON.stringify(band) !== JSON.stringify(previous)) out[key] = band;
+    else if (band === undefined && previous !== undefined && !(Array.isArray(previous.blocks) && previous.blocks.length === 0)) out[key] = { blocks: [] };
+  }
+  return out;
+}
+
+/** What the first section asks for that the model cannot hold. */
+function droppedByFirstSection(sectPr: XmlNode | undefined): number {
+  return (columns(sectPr) > 1 ? 1 : 0) + (restarts(sectPr, false) ? 1 : 0) + (paperKnown(sectPr) ? 0 : 1);
+}
+
+/** `w:cols w:num`, 1 when absent. */
+function columns(sectPr: XmlNode | undefined): number {
+  return numAttr(el(sectPr, "cols"), "num") ?? 1;
+}
+
+/** `w:pgNumType w:start`: a first section starting at 1 changes nothing; any later start is a restart. */
+function restarts(sectPr: XmlNode | undefined, later: boolean): boolean {
+  const start = numAttr(el(sectPr, "pgNumType"), "start");
+  return start !== null && (later || start !== 1);
+}
+
+/** Whether the section's paper is one the model names. No `w:pgSz` is the default, so it is. */
+function paperKnown(sectPr: XmlNode | undefined): boolean {
+  const pgSz = el(sectPr, "pgSz");
+  if (!pgSz) return true;
+  let w = numAttr(pgSz, "w") ?? 12240;
+  let h = numAttr(pgSz, "h") ?? 15840;
+  if (at(pgSz, "orient") === "landscape") [w, h] = [h, w];
+  return Object.values(PAGE_SIZES).some((dims) => dims[0] === w && dims[1] === h);
 }
 
 function contentWidthOf(sectPr: XmlNode | undefined): number {
@@ -1089,6 +1283,12 @@ function paragraphPropsFrom(pPr: XmlNode | undefined): Record<string, unknown> {
 }
 
 /** A paragraph carrying no runs and no properties — the adjacent-table pad. */
+/** A paragraph with no runs, whatever its spacing says: nothing an author could lose. */
+function holdsNothing(block: Block): boolean {
+  const b = block as Any;
+  return b?.type === "paragraph" && Array.isArray(b.runs) && b.runs.length === 0;
+}
+
 function isEmptyParagraph(block: Block | undefined): boolean {
   const b = block as Any;
   return (

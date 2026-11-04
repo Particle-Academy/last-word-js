@@ -75,32 +75,6 @@ function checkBorders(value: Any, path: string, label: string, edges: string[]):
 }
 
 /**
- * A break asking for a different page. A .docx has one page setup until the
- * writer implements `page`, so it is refused rather than ignored: a document that
- * silently comes out all portrait looks fine. Repair leaves these keys in place,
- * so `validateAndRepair` stays `ok: false`. The messages are PHP's, byte for byte
- * (unlike the rest of this file, which has its own sentence case), so all three
- * engines say the same thing about this.
- */
-function validatePageBreak(block: Any, path: string): ValidationError[] {
-  const errors: ValidationError[] = [];
-  if (block.page !== undefined) {
-    errors.push(
-      err(
-        `${path}/page`,
-        "pageBreak.page is not implemented in last-word yet; remove page to keep one page setup, or write this document as a PDF with fine-print",
-      ),
-    );
-  }
-  for (const key of Schema.PAGE_BREAK_NEAR_MISS_KEYS) {
-    if (block[key] !== undefined) {
-      errors.push(err(`${path}/${key}`, `a pageBreak has no ${key} key; use pageBreak.page`));
-    }
-  }
-  return errors;
-}
-
-/**
  * The properties every paragraph-shaped block accepts.
  *
  * Shared by `paragraph`, `heading` and list items, because a heading is a
@@ -335,48 +309,7 @@ export class Validator {
       if (!isPlainObject(doc.page)) {
         errors.push(err("/page", "Doc `page` must be an object (`{ size?, orientation?, margins? }`)."));
       } else {
-        errors.push(...checkEnum(doc.page.size, "/page/size", "Page `size`", ["letter", "legal", "a4"]));
-        errors.push(
-          ...checkEnum(doc.page.orientation, "/page/orientation", "Page `orientation`", ["portrait", "landscape"]),
-        );
-        errors.push(...checkBoxSides(doc.page.margins, "/page/margins", "Page `margins`"));
-        const margins = doc.page.margins;
-        for (const distance of ["header", "footer"] as const) {
-          const value = isPlainObject(margins) ? (margins as Any)[distance] : undefined;
-          if (value !== undefined && value !== null && (!isNum(value) || value < 0)) {
-            errors.push(
-              err(
-                `/page/margins/${distance}`,
-                `Page margins \`${distance}\` is the distance from the page edge to the ${distance}: a number of points, 0 or more (36 by default).`,
-              ),
-            );
-          }
-        }
-        for (const kind of Schema.PAGE_BANDS) {
-          const band = doc.page[kind];
-          if (band === undefined || band === null) continue;
-          if (!isPlainObject(band)) {
-            errors.push(err(`/page/${kind}`, `Page \`${kind}\` must be an object (\`{ left?, center?, right?, size?, color? }\`).`));
-            continue;
-          }
-          // A header or footer cannot hold a footnote. This engine writes no
-          // `{blocks}` band (PHP 0.14.0, last-word#6, is not ported), but an
-          // agent writing one for either engine is told the same thing here.
-          eachRun((band as Any).blocks, `/page/${kind}/blocks`, (run, runPath) => {
-            if (hasFootnote(run)) errors.push(err(`${runPath}/footnote`, "A header or footer cannot hold a footnote."));
-          });
-          for (const slot of ["left", "center", "right"]) {
-            if (band[slot] !== undefined && typeof band[slot] !== "string") {
-              errors.push(err(`/page/${kind}/${slot}`, `Page \`${kind}.${slot}\` must be text.`));
-            }
-          }
-          if (band.size !== undefined && !(typeof band.size === "number" && band.size > 0)) {
-            errors.push(err(`/page/${kind}/size`, `Page \`${kind}.size\` must be a positive number of points.`));
-          }
-          if (band.color !== undefined && !(typeof band.color === "string" && /^#[0-9A-Fa-f]{6}$/.test(band.color))) {
-            errors.push(err(`/page/${kind}/color`, `Page \`${kind}.color\` must be #RRGGBB.`));
-          }
-        }
+        errors.push(...this.validatePage(doc.page, "/page"));
       }
     }
 
@@ -390,6 +323,86 @@ export class Validator {
       });
     }
 
+    return errors;
+  }
+
+  /** A page object, wherever it sits: the document's or a break's. */
+  private validatePage(page: Any, at: string): ValidationError[] {
+    const errors: ValidationError[] = [];
+    errors.push(...checkEnum(page.size, `${at}/size`, "Page `size`", ["letter", "legal", "a4"]));
+    errors.push(...checkEnum(page.orientation, `${at}/orientation`, "Page `orientation`", ["portrait", "landscape"]));
+    errors.push(...checkBoxSides(page.margins, `${at}/margins`, "Page `margins`"));
+    const margins = page.margins;
+    for (const distance of ["header", "footer"] as const) {
+      const value = isPlainObject(margins) ? (margins as Any)[distance] : undefined;
+      if (value !== undefined && value !== null && (!isNum(value) || value < 0)) {
+        errors.push(
+          err(
+            `${at}/margins/${distance}`,
+            `Page margins \`${distance}\` is the distance from the page edge to the ${distance}: a number of points, 0 or more (36 by default).`,
+          ),
+        );
+      }
+    }
+    for (const kind of Schema.PAGE_BANDS) {
+      const band = page[kind];
+      if (band === undefined || band === null) continue;
+      if (!isPlainObject(band)) {
+        errors.push(err(`${at}/${kind}`, `Page \`${kind}\` must be an object (\`{ left?, center?, right?, size?, color? }\`).`));
+        continue;
+      }
+      // A header or footer cannot hold a footnote. This engine writes no
+      // `{blocks}` band (PHP 0.14.0, last-word#6, is not ported), but an
+      // agent writing one for either engine is told the same thing here.
+      eachRun((band as Any).blocks, `${at}/${kind}/blocks`, (run, runPath) => {
+        if (hasFootnote(run)) errors.push(err(`${runPath}/footnote`, "A header or footer cannot hold a footnote."));
+      });
+      for (const slot of ["left", "center", "right"]) {
+        if ((band as Any)[slot] !== undefined && typeof (band as Any)[slot] !== "string") {
+          errors.push(err(`${at}/${kind}/${slot}`, `Page \`${kind}.${slot}\` must be text.`));
+        }
+      }
+      const size = (band as Any).size;
+      if (size !== undefined && !(typeof size === "number" && size > 0)) {
+        errors.push(err(`${at}/${kind}/size`, `Page \`${kind}.size\` must be a positive number of points.`));
+      }
+      const color = (band as Any).color;
+      if (color !== undefined && !(typeof color === "string" && /^#[0-9A-Fa-f]{6}$/.test(color))) {
+        errors.push(err(`${at}/${kind}/color`, `Page \`${kind}.color\` must be #RRGGBB.`));
+      }
+    }
+    return errors;
+  }
+
+  /**
+   * A page break, and what it may carry. A page key sitting on the break itself is a
+   * near-miss: ignored, the agent would think it had turned the page. `page` is a page
+   * object, on a top-level break, with no background: Word has one page colour per
+   * document. The messages are PHP's, byte for byte (unlike the rest of this file,
+   * which has its own sentence case), so all three engines say the same thing.
+   */
+  private validatePageBreak(block: Any, path: string): ValidationError[] {
+    const errors: ValidationError[] = [];
+    for (const key of Schema.PAGE_BREAK_NEAR_MISS_KEYS) {
+      if (block[key] !== undefined) {
+        errors.push(err(`${path}/${key}`, `a pageBreak has no ${key} key; use pageBreak.page`));
+      }
+    }
+    const page = block.page;
+    if (page === undefined || page === null) return errors;
+    if (!Schema.isPageObject(page)) {
+      errors.push(err(`${path}/page`, "page on a break must be an object of page settings, {} for a new stretch with nothing changed"));
+      return errors;
+    }
+    if (!/^\/blocks\/\d+$/.test(path)) {
+      errors.push(err(`${path}/page`, "page settings go on a top-level page break; a break nested in a quote or a table cell cannot change the page"));
+      return errors;
+    }
+    if (!isPlainObject(page)) return errors;
+    if ((page as Any).background !== undefined) {
+      errors.push(err(`${path}/page/background`, "a document has one page colour: set background on the top-level page, not on a break"));
+    }
+    errors.push(...this.validatePage(page, `${path}/page`));
     return errors;
   }
 
@@ -537,7 +550,7 @@ export class Validator {
         break;
 
       case "pageBreak":
-        errors.push(...validatePageBreak(block, path));
+        errors.push(...this.validatePageBreak(block, path));
         break;
 
       case "hr":

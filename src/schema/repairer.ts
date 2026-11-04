@@ -107,6 +107,51 @@ export class Repairer {
   }
 
   /**
+   * A page break. `page` stays, and page keys typed on the break itself move into it,
+   * each with a note: stripped, an orientation change would be silently undone and
+   * still report success. A background goes, also with a note. As PHP's
+   * `repairPageBreak()`, in its words; anything else on the break is kept, as this
+   * engine always has.
+   */
+  private repairPageBreak(block: Any, path: string): Any {
+    const out: Any = { ...block };
+    let page = out.page;
+    const moved: Any = {};
+    for (const key of Schema.PAGE_BREAK_NEAR_MISS_KEYS) {
+      if (out[key] === undefined) continue;
+      if (isPlainObject(page) && (page as Any)[key] !== undefined) {
+        this.notes.push({ path: `${path}/${key}`, message: `dropped ${key} from the break: its page already says what it is` });
+      } else {
+        moved[key] = out[key];
+        this.notes.push({ path: `${path}/${key}`, message: `moved ${key} into the break's "page": a break's page settings go there` });
+      }
+      delete out[key];
+    }
+    if (Object.keys(moved).length > 0) page = isPlainObject(page) ? { ...(page as Any), ...moved } : moved;
+    if (page === undefined || page === null) {
+      delete out.page;
+      return out;
+    }
+    if (!Schema.isPageObject(page)) {
+      delete out.page;
+      this.notes.push({ path: `${path}/page`, message: "removed: page on a break must be an object of page settings, {} for a new stretch with nothing changed" });
+      return out;
+    }
+    if (!/^\/blocks\/\d+$/.test(path)) {
+      delete out.page;
+      this.notes.push({ path: `${path}/page`, message: "removed: page settings go on a top-level page break; a break nested in a quote or a table cell cannot change the page" });
+      return out;
+    }
+    if (isPlainObject(page) && (page as Any).background !== undefined) {
+      page = { ...(page as Any) };
+      delete page.background;
+      this.notes.push({ path: `${path}/page/background`, message: "removed background from the break: a document has one page colour" });
+    }
+    out.page = page;
+    return out;
+  }
+
+  /**
    * `meta` (PHP 0.16.0): `meta.title` moves to the top-level `title` when there
    * is none (and is dropped when there is: the top-level one is the title); a
    * non-text author is coerced when it is a scalar and dropped otherwise; a
@@ -232,10 +277,9 @@ export class Repairer {
       case "chart":
         return this.repairChart(block, path);
 
-      // A break keeps its keys, `page` and the near-miss ones above all: stripped,
-      // any unrelated repair elsewhere would turn a refused landscape section into
-      // `ok: true` and an all-portrait document.
       case "pageBreak":
+        return this.repairPageBreak(block, path);
+
       case "hr":
         break;
     }

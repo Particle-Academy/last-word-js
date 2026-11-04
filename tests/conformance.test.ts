@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { loadSuite, runTable, formatSummary, deepEquals } from "@particle-academy/fancy-conformance";
-import type { CaseResult, ConformanceCase, RunSummary } from "@particle-academy/fancy-conformance";
+import { loadSuite, runTable, formatSummary, deepEquals, fixtureBytes } from "@particle-academy/fancy-conformance";
+import type { CaseResult, ConformanceCase, FileRef, RunSummary } from "@particle-academy/fancy-conformance";
 
 import { Agent, unzipSync } from "../src";
 import { parseXml, el, els, at, type XmlNode } from "../src/reader/xml";
@@ -240,10 +240,48 @@ function coreProps(input: RowInput): unknown {
 }
 
 /** Functions that take the row's WHOLE input (fancy-conformance 0.41.0). */
+/**
+ * Every w:sectPr of document.xml in document order: its properties without its header
+ * and footer references, and those as {kind, type, target, tabs}.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Any = any;
+
+function sections(input: RowInput): unknown {
+  const parts = unzipSync(writeInput(input)) as Record<string, Uint8Array>;
+  const text = (name: string): string => new TextDecoder().decode(parts[name]);
+  const rels = text("word/_rels/document.xml.rels");
+  const targets = Object.fromEntries([...rels.matchAll(/<Relationship Id="([^"]+)"[^>]*Target="([^"]+)"/g)].map((m) => [m[1], m[2]]));
+  const attrs = (raw: string): Record<string, string> => Object.fromEntries([...raw.matchAll(/w:(\w+)="([^"]*)"/g)].map((m) => [m[1], m[2]]));
+  return [...text("word/document.xml").matchAll(/<w:sectPr>(.*?)<\/w:sectPr>/gs)].map((sect) => {
+    const references: unknown[] = [];
+    const props: unknown[] = [];
+    for (const m of sect[1]!.matchAll(/<w:(\w+)((?: [^>]*?)?)\/>|<w:(pgBorders)[^>]*>.*?<\/w:pgBorders>/gs)) {
+      const name = m[1]!;
+      if (name === "headerReference" || name === "footerReference") {
+        const target = targets[/r:id="([^"]+)"/.exec(m[2]!)![1]!]!;
+        const stops = /<w:tabs>(.*?)<\/w:tabs>/s.exec(text(`word/${target}`))?.[1] ?? "";
+        references.push({
+          kind: name === "headerReference" ? "header" : "footer",
+          type: attrs(m[2]!).type,
+          target,
+          tabs: [...stops.matchAll(/w:pos="(\d+)"/g)].map((t) => t[1]),
+        });
+      } else {
+        const a = attrs(m[2]!);
+        props.push([name, Object.keys(a).length === 0 ? true : a]);
+      }
+    }
+    return { props, references };
+  });
+}
+
 const INPUT_EXTRACTORS: Record<string, (input: RowInput) => unknown> = {
   bandParts,
   bandFields,
   coreProps,
+  sections,
+  readFile: (input) => Agent.read(fixtureBytes(SUITE, (input as unknown as { file: FileRef }).file)),
   readBack: (input) => Agent.read(writeInput(input)),
   // The comparator is the suite's own, so "equal" means the same thing here as
   // it does for every other row.
@@ -341,7 +379,12 @@ describe("fancy-conformance: doc-model/page-refusal", () => {
     for (const row of cases) {
       const doc = (row.input as { doc: unknown }).doc;
       const want = (row.expected as { lastWord: { messages?: string[]; repairOk: boolean } }).lastWord;
-      const got: { repairOk: boolean; messages?: string[] } = { repairOk: Agent.validateAndRepair(doc).ok };
+      const repaired = Agent.validateAndRepair(doc) as Any;
+      const got: { repairOk: boolean; messages?: string[]; pageKept?: boolean } = { repairOk: repaired.ok };
+      if ((want as { pageKept?: boolean }).pageKept !== undefined) {
+        const kept = (blocks: Any[]): number => blocks.filter((b) => b?.type === "pageBreak" && b.page !== undefined).length;
+        got.pageKept = kept(repaired.schema.blocks) === kept((doc as Any).blocks);
+      }
       if (want.messages !== undefined) got.messages = Agent.validate(doc).map((e) => e.message);
       if (!deepEquals(got, want)) failed.push(`${row.id} expected ${JSON.stringify(want)} got ${JSON.stringify(got)}`);
     }

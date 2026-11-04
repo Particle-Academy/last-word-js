@@ -60,7 +60,7 @@ unions — exactly what an agent emits:
 | quote | `{ type: "quote", blocks }` |
 | image | `{ type: "image", src: "data:image/png;base64,…", widthPx?, heightPx?, alt? }` |
 | chart | `{ type: "chart", option: <ECharts option>, widthPx?, heightPx?, width? (% of column), numberFormat?, alt? }` — a native, editable Word chart (bar / column / line / pie) with an embedded workbook; `option` is the same field dark-slide's chart takes |
-| pageBreak | `{ type: "pageBreak" }` |
+| pageBreak | `{ type: "pageBreak", page? }` |
 | hr | `{ type: "hr" }` |
 
 A `Run` is an inline span: `{ text, bold?, italic?, underline?, strike?,
@@ -146,7 +146,7 @@ Band text takes live Word fields: `{page}`, `{pages}`, `{section}`,
 `{date:FORMAT}` / `{time:FORMAT}` with a Word picture (`{date:yyyy-MM-dd}`,
 `{time:HH:mm}`). Names are lower-case and exact; anything else in braces is
 literal, and in the body every token is literal. The cached result is
-deterministic: `1` for the page and section numbers, the author and title for
+deterministic: `1` for the page numbers, the section's number for `{section}`, the author and title for
 AUTHOR and TITLE, nothing for DATE, TIME and FILENAME. `Schema.splitFieldTokens()`
 and `Schema.fieldTokenOf()` are the grammar.
 
@@ -289,14 +289,22 @@ validating ops on the wire or registering the vocabulary as an LLM tool.
 
 ## One page setup, for now
 
-A file with section breaks reads with the last section's page and the rest
-flattened into it, and says so: `"unrepresented": [{"where": "/page", "kind":
-"layout-not-preserved", "count": 1}]`, where `count` is the section breaks lost.
-On the way in, `pageBreak.page` is refused until a later release writes it,
-`validateAndRepair` included: repair leaves it in place and the result is
-`ok: false`. The same goes for page keys written straight on a break
-(`pageBreak.orientation`, `.margins`, ...) and for a top-level `sections`, neither
-of which exists. `fine-print` honours `pageBreak.page` for PDFs today.
+**Mixed pages.** A `pageBreak` carrying `page` changes the page from there on:
+`{"type": "pageBreak", "page": {"orientation": "landscape", "margins": {"left": 28.8, "right": 28.8}}}`.
+It is `fine-print`'s vocabulary, and there is no `sections` key. `margins` merge side
+by side and every other key is replaced whole; `firstHeader` / `firstFooter` are never
+inherited; `{"type": "pageBreak", "page": {}}` starts a new stretch with nothing changed.
+`page.background` on a break, `page` on a break in a quote or a table cell, page keys
+straight on a break and a top-level `sections` are refused; repair moves page keys into
+`page`, with a note. In the file each stretch is a Word section.
+
+Reading works the other way round: top-level `page` is the FIRST section, and each later
+one a break holding only what differs from the page before it. `oddPage` / `evenPage` read
+as a break and a report, `continuous` with the same size and orientation as no break and a
+report, `continuous` with another size or orientation as a break. `w:cols` above 1, a
+page-number restart and a paper other than letter, legal or A4 are dropped and reported:
+`"unrepresented": [{"where": "/blocks/2", "kind": "layout-not-preserved", "count": 1}]`, at
+`/page` for the first section.
 
 ## Reading .doc, .odt and .rtf
 
