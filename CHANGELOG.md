@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The agent guide (`Agent.guide()`) covers the whole Agent surface.** Byte-identical to the PHP package's: it gains a "Working from an existing document" section (`read` / `fromBytes` and how a multi-section file reads, `describe`, editing by ops with `opSchema` / `reduce` / `diff` / `equivalent`, the markdown bridges, `convertTemplate`, and the PHP-only exchange surface), and step 3 names `validateAndRepair`. **Consumer action:** none; a guide-only change.
+
+### Added
+
+- Dev: `tests/agent-guide-covers-the-api.test.ts` fails when a function on `Agent` exists that the guide never names as code, unless it is on the test's allowlist with a reason (today `guide` and `version`).
+
 ## [0.16.1] - 2026-11-04
 
 ### Security
