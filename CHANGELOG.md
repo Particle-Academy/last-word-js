@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Releases need a lab-run certificate.** `publish.yml` gains a read-only
+  `lab-certificate` job that every publishing job needs: a tag is published only
+  when the fancy-labs lab has certified that exact version and commit. Consumers
+  do nothing; this changes how releases are cut, not what the package does.
+
 ## [0.16.2] - 2026-11-10
 
 ### Changed
@@ -733,7 +740,6 @@ map, where a JS object is always in key order. No valid document hits either.
   `VersionIsSingleSourcedTest` / `version.test.ts` now pins it, so the class is
   closed rather than the instance fixed. `dark-slide-py` already had that
   assertion and was the only engine in the family to catch itself.
-
 
 - **Adjacent tables no longer merge into one in Word.** OOXML merges two
   `<w:tbl>` elements that touch, imposing the first table's column grid on the
