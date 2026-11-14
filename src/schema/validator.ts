@@ -2,6 +2,7 @@ import { isPlainObject } from "../util";
 import { Schema } from "./schema";
 import type { ValidationError } from "./types";
 import { SUPPORTED_CHART_TYPES, pointValue } from "../helpers/chart";
+import { IMAGE_PREFIX, NamedImages } from "../writer/named-images";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -218,6 +219,22 @@ function checkHexPresent(value: Any, path: string, label: string): ValidationErr
 /** How deep the footnote refusal walk goes, as PHP's `Portable::MAX_DEPTH`. */
 const MAX_DEPTH = 64;
 
+/** A `{blocks}` band's image limits: PHP `TemplateSection::MEDIA_LIMIT` and `MEDIA_TOTAL_LIMIT`. */
+const BAND_MEDIA_LIMIT = 16777216;
+const BAND_MEDIA_TOTAL_LIMIT = 33554432;
+
+function decodeBase64(payload: string): Uint8Array {
+  if (typeof Buffer !== "undefined") {
+    const buf = Buffer.from(payload, "base64");
+    return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+  }
+  // eslint-disable-next-line no-undef
+  const bin = atob(payload);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
 /** True when a run carries a `footnote` key (any value), as PHP's `array_key_exists`. */
 export function hasFootnote(run: Any): boolean {
   return isPlainObject(run) && Object.prototype.hasOwnProperty.call(run, "footnote") && (run as Any).footnote !== undefined;
@@ -265,10 +282,21 @@ export class Validator {
    * run is refused inside a footnote -- Word has none inside another -- and in
    * a header or footer (see the band check in `validate()`).
    */
-  private context: "body" | "footnote" = "body";
+  private context: "body" | "footnote" | "band" = "body";
+
+  /** Band image bytes so far, across the document's page and every break's: the limit is the document's. */
+  private bandMedia = 0;
+
+  /**
+   * `imageNames`: the images the host registered (CC-fancy-0039). An image `src` of
+   * `image:<name>` is valid for exactly these, and refused with the code
+   * `image_unknown` for any other name -- including when there are none.
+   */
+  constructor(private readonly imageNames: readonly string[] = []) {}
 
   validate(doc: Any): ValidationError[] {
     this.context = "body";
+    this.bandMedia = 0;
     const errors: ValidationError[] = [];
     if (!isPlainObject(doc)) {
       return [err("/", "Doc must be a JSON object with a `blocks` array.")];
@@ -351,12 +379,10 @@ export class Validator {
         errors.push(err(`${at}/${kind}`, `Page \`${kind}\` must be an object (\`{ left?, center?, right?, size?, color? }\`).`));
         continue;
       }
-      // A header or footer cannot hold a footnote. This engine writes no
-      // `{blocks}` band (PHP 0.14.0, last-word#6, is not ported), but an
-      // agent writing one for either engine is told the same thing here.
-      eachRun((band as Any).blocks, `${at}/${kind}/blocks`, (run, runPath) => {
-        if (hasFootnote(run)) errors.push(err(`${runPath}/footnote`, "A header or footer cannot hold a footnote."));
-      });
+      if (Object.prototype.hasOwnProperty.call(band, "blocks")) {
+        errors.push(...this.validateBlocksBand(band as Any, kind, at));
+        continue;
+      }
       for (const slot of ["left", "center", "right"]) {
         if ((band as Any)[slot] !== undefined && typeof (band as Any)[slot] !== "string") {
           errors.push(err(`${at}/${kind}/${slot}`, `Page \`${kind}.${slot}\` must be text.`));
@@ -372,6 +398,83 @@ export class Validator {
       }
     }
     return errors;
+  }
+
+  /**
+   * A `{blocks}` header or footer (PHP 0.14.0, last-word#6): the body's blocks less
+   * `Schema.BAND_REFUSED_TYPES` at any depth, never mixed with the one-line slots,
+   * no footnote, and its images checked the way PHP checks a band's media -- PNG or
+   * JPEG matching the declared type by their leading bytes, at most 16 MiB each and
+   * 32 MiB across the header and footer. Mirrors PHP `Validator::validateBlocksBand()`.
+   */
+  private validateBlocksBand(band: Any, kind: string, at: string): ValidationError[] {
+    const errors: ValidationError[] = [];
+    const mixed = ["left", "center", "right", "size", "color"].filter((k) => Object.prototype.hasOwnProperty.call(band, k));
+    if (mixed.length > 0) {
+      errors.push(
+        err(`${at}/${kind}`, `Page \`${kind}\` is either { left, center, right, size, color } or { blocks }, never both (found blocks with ${mixed.join(", ")}).`),
+      );
+    }
+    const blocks = band.blocks;
+    if (!Array.isArray(blocks)) {
+      errors.push(err(`${at}/${kind}/blocks`, `Page \`${kind}.blocks\` must be a list of block objects.`));
+      return errors;
+    }
+    const path = `${at}/${kind}/blocks`;
+    const outer = this.context;
+    this.context = "band";
+    try {
+      blocks.forEach((block: Any, i: number) => {
+        if (isPlainObject(block) && (Schema.BAND_REFUSED_TYPES as readonly string[]).includes((block as Any).type)) {
+          return; // refused below; its own rules are beside the point
+        }
+        errors.push(...this.validateBlock(block, `${path}/${i}`));
+      });
+    } finally {
+      this.context = outer;
+    }
+    this.validateBandContent(blocks, path, errors);
+    return errors;
+  }
+
+  private validateBandContent(blocks: Any[], path: string, errors: ValidationError[], depth = 0): void {
+    if (depth > MAX_DEPTH) return;
+    blocks.forEach((block: Any, i: number) => {
+      if (!isPlainObject(block)) return;
+      const at = `${path}/${i}`;
+      const b = block as Any;
+      if ((Schema.BAND_REFUSED_TYPES as readonly string[]).includes(b.type)) {
+        errors.push(err(`${at}/type`, `A header or footer cannot hold a ${b.type} block.`));
+        return;
+      }
+      const m = b.type === "image" && typeof b.src === "string" ? /^data:image\/(png|jpe?g);base64,([\s\S]*)$/.exec(b.src) : null;
+      if (m !== null) {
+        const payload = m[2]!.replace(/\s+/g, "");
+        const valid = payload.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(payload);
+        const bytes = valid ? decodeBase64(payload) : null;
+        const png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+        const jpeg = [0xff, 0xd8, 0xff];
+        const sig = m[1] === "png" ? png : jpeg;
+        if (bytes === null || bytes.length < sig.length || !sig.every((v, k) => bytes[k] === v)) {
+          errors.push(err(`${at}/src`, "A header or footer image must be PNG or JPEG bytes matching its data URL type."));
+        } else if (bytes.length > BAND_MEDIA_LIMIT) {
+          errors.push(err(`${at}/src`, `A header or footer image is over ${BAND_MEDIA_LIMIT} bytes.`));
+        } else if ((this.bandMedia += bytes.length) > BAND_MEDIA_TOTAL_LIMIT) {
+          errors.push(err(`${at}/src`, `Header and footer images together are over ${BAND_MEDIA_TOTAL_LIMIT} bytes.`));
+        }
+      }
+      if (b.type === "quote" && Array.isArray(b.blocks)) this.validateBandContent(b.blocks, `${at}/blocks`, errors, depth + 1);
+      if (b.type === "table" && Array.isArray(b.rows)) {
+        b.rows.forEach((row: Any, r: number) => {
+          const cells = isPlainObject(row) && Array.isArray((row as Any).cells) ? (row as Any).cells : [];
+          cells.forEach((cell: Any, c: number) => {
+            if (isPlainObject(cell) && Array.isArray((cell as Any).blocks)) {
+              this.validateBandContent((cell as Any).blocks, `${at}/rows/${r}/cells/${c}/blocks`, errors, depth + 1);
+            }
+          });
+        });
+      }
+    });
   }
 
   /**
@@ -532,6 +635,12 @@ export class Validator {
       case "image":
         if (typeof block.src !== "string" || block.src === "") {
           errors.push(err(`${path}/src`, "Image must have a `src` data URL string."));
+        } else if (block.src.startsWith(IMAGE_PREFIX)) {
+          // A registered image, by name (CC-fancy-0039); resolved at write time.
+          const name = block.src.slice(IMAGE_PREFIX.length);
+          if (!this.imageNames.includes(name)) {
+            errors.push(NamedImages.unknownError(`${path}/src`, name, [...this.imageNames]));
+          }
         } else if (!block.src.startsWith("data:image/")) {
           errors.push(err(`${path}/src`, "Image `src` must be a data:image/png or data:image/jpeg data URL."));
         }
@@ -617,6 +726,9 @@ export class Validator {
    */
   private validateFootnote(run: Any, runPath: string): ValidationError[] {
     const at = `${runPath}/footnote`;
+    if (this.context === "band") {
+      return [err(at, "A header or footer cannot hold a footnote.")];
+    }
     if (this.context === "footnote") {
       return [err(at, "A footnote cannot hold a footnote.")];
     }

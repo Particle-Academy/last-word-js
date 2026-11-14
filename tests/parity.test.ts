@@ -5,6 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, unzipSync } from "../src";
 import chartCases from "../test/fixtures/charts.json";
+import namedImagesFixture from "../test/fixtures/named-images.json";
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const namedImages = namedImagesFixture as any;
 
 /**
  * Cross-engine WRITER parity — the guarantee this pair was missing.
@@ -561,6 +565,39 @@ describe.skipIf(!HAS_PHP)("cross-engine writer parity (PHP vs TS)", () => {
     expect(Agent.read(new Uint8Array(readFileSync(phpOut)))).toStrictEqual(FOOTNOTE_READ_DOC);
     expect(Agent.read(new Uint8Array(readFileSync(phpOut)))).toStrictEqual(Agent.read(Agent.toBytes(FOOTNOTE_READ_DOC)));
   });
+
+  /**
+   * Named images (CC-fancy-0039), against a LIVE PHP: the shared fixture's documents
+   * and images, written by both engines. named-images.test.ts holds PHP's part
+   * hashes and runs without PHP; this is the same contract checked against whatever
+   * PHP is checked out beside it, so a PHP change the fixture has not caught up with
+   * shows here. Every part but the three boilerplate ones must match.
+   */
+  for (const name of Object.keys(namedImages.cases)) {
+    it(`emits the same parts as PHP for a named-image document: ${name}`, () => {
+      const doc = namedImages.cases[name].doc;
+      const docFile = join(dir, `named-${name}.json`);
+      const optionsFile = join(dir, `named-${name}.options.json`);
+      const phpOut = join(dir, `named-${name}.php.docx`);
+      writeFileSync(docFile, JSON.stringify(doc));
+      writeFileSync(optionsFile, JSON.stringify({ images: namedImages.images }));
+      php([PHP_SCRIPT, docFile, phpOut, optionsFile]);
+      const phpParts = unzipSync(new Uint8Array(readFileSync(phpOut)));
+      const tsParts = unzipSync(Agent.toBytes(doc, { images: namedImages.images }));
+
+      expect(Object.keys(tsParts).sort(), "the two engines wrote different part sets").toEqual(Object.keys(phpParts).sort());
+      expect(Object.keys(phpParts).some((p) => p.startsWith("word/media/")), "no image was written").toBe(true);
+      const dec = new TextDecoder();
+      for (const part of Object.keys(phpParts)) {
+        if (BOILERPLATE_ONLY.includes(part)) continue;
+        if (part.startsWith("word/media/")) {
+          expect(tsParts[part], part).toEqual(phpParts[part]);
+        } else {
+          expect(dec.decode(tsParts[part]!), `${name}: ${part}`).toBe(dec.decode(phpParts[part]!));
+        }
+      }
+    });
+  }
 
   it("compared something — the loop is not empty", () => {
     // The guard the other suites lacked. If DOCS emptied, or unzip returned

@@ -4,7 +4,7 @@ import { Agent, Schema, unzipSync, zipSync } from "../src";
 /**
  * First and even bands of a document's own (PHP last-word 0.16.0, MOIC
  * 2026-11-01). Mirrors PHP's FirstPageBandsTest, less what this engine does not
- * have: it writes no `{blocks}` band and carries no template section
+ * have: it carries no template section
  * (`templateParts`), so the letterhead option `templateFirstPageOnly` has
  * nothing to act on here. Byte parity with PHP is in parity.test.ts.
  *
@@ -242,11 +242,13 @@ describe("the model rules for first and even bands", () => {
   it("publishes the first and even bands in the schema, each the shape of page.header", () => {
     const page = (((Agent.jsonSchema().properties as Any).page as Any).properties as Any) ?? {};
 
-    // header's own band, or the blank {"blocks": []} a variant uses to empty its page.
+    // header's own shapes: a one-line band, or blocks -- {"blocks": []} being how a
+    // variant empties its page, and a letterhead's logo the other end of it.
     for (const key of ["firstHeader", "firstFooter", "evenHeader", "evenFooter"]) {
       expect(page).toHaveProperty([key]);
-      expect((page[key] as Any).oneOf).toEqual([{ $ref: (page.header as Any).$ref }, { $ref: "#/definitions/blankBand" }]);
+      expect((page[key] as Any).oneOf).toEqual((page.header as Any).oneOf);
     }
+    expect((page.header as Any).oneOf).toEqual([{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blocksBand" }]);
     expect(Schema.PAGE_BANDS).toEqual(["header", "footer", "firstHeader", "firstFooter", "evenHeader", "evenFooter"]);
   });
 

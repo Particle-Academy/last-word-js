@@ -7,7 +7,9 @@ declare(strict_types=1);
  * given JSON doc, so the TS port can be diffed against it. Uses a minimal
  * PSR-4 autoloader (the PHP core is zero-dependency) — no composer needed.
  *
- *   php php-tobytes.php <doc.json> <out.docx>
+ *   php php-tobytes.php <doc.json> <out.docx> [options.json]
+ *
+ * `options.json` carries `images` / `imageLimits` (named images) and nothing else.
  *
  * `LAST_WORD_PHP_SRC` is checked before the sibling checkout. A hard-coded
  * sibling path alone would resolve only inside the .agi envelope, so CI — or
@@ -44,4 +46,12 @@ if (! class_exists(\LastWord\Agent::class)) {
     exit(3);
 }
 
-file_put_contents($argv[2], \LastWord\Agent::toBytes($doc));
+// Optional write options as JSON (named images, CC-fancy-0039): only the keys
+// that are data, never a path the PHP side would read.
+$options = [];
+if (isset($argv[3])) {
+    $given = json_decode((string) file_get_contents($argv[3]), true, 512, JSON_THROW_ON_ERROR);
+    $options = array_intersect_key(is_array($given) ? $given : [], array_flip(['images', 'imageLimits']));
+}
+
+file_put_contents($argv[2], \LastWord\Agent::toBytes($doc, $options));

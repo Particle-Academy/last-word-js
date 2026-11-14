@@ -21,8 +21,8 @@ import { parseXml, type XmlNode } from "../src/reader/xml";
  * cached result, end -- every piece in the band's formatting, as `{page}`
  * already was. The cached result is deterministic: see FIELD_ROWS.
  *
- * (PHP also writes these in a `{blocks}` band's run text; this engine writes no
- * `{blocks}` band, so that half is not here.)
+ * (Both engines also write these in a `{blocks}` band's run text; that half is
+ * conformance row 0069 and the named-images letterhead fixture.)
  */
 type Any = Record<string, unknown>;
 

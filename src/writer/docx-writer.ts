@@ -55,6 +55,9 @@ const FOOTNOTE_MARK = `<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr>
  */
 const FOOTNOTE_REFUSED_TYPES: readonly string[] = ["chart", "pageBreak", "portable"];
 
+/** Block types a `{blocks}` band skips, at any depth (`Schema.BAND_REFUSED_TYPES`). */
+const BAND_REFUSED_TYPES: readonly string[] = ["chart", "pageBreak", "portable"];
+
 /** A run carrying a `footnote` key, as PHP's `array_key_exists('footnote', $run)`. */
 function isFootnoteRun(run: unknown): boolean {
   return isPlainObject(run) && Object.prototype.hasOwnProperty.call(run, "footnote") && (run as Any).footnote !== undefined;
@@ -93,6 +96,8 @@ const BOX_EDGES = ["top", "left", "bottom", "right"] as const;
 /** SDT tag prefixes used to round-trip block metadata that OOXML has no slot for. */
 export const SDT_TAG_CODE = "lastword:code";
 export const SDT_TAG_QUOTE = "lastword:quote";
+/** Wraps a `{blocks}` header or footer's content (PHP `DocxWriter::SDT_TAG_BAND`, last-word#6). */
+export const SDT_TAG_BAND = "lastword:band";
 
 interface MediaFile {
   name: string; // e.g. image1.png
@@ -452,6 +457,22 @@ export class DocxWriter {
   private inFootnote = false;
 
   /**
+   * True while a `{blocks}` band renders (PHP 0.14.0, last-word#6): field tokens in
+   * run text are live fields, a footnote run is nothing, and a chart or page break
+   * is skipped (validation refuses both there).
+   */
+  private inBand = false;
+
+  /** A `{blocks}` band's OWN relationships, part name => rels, written as `word/_rels/{name}.xml.rels`. */
+  private bandRels = new Map<string, Rel[]>();
+
+  /**
+   * `{blocks}` bands placed by `bandPart()` and rendered after the body, in the order
+   * PHP renders them, with the text width and section number of the stretch that set them.
+   */
+  private deferredBands: { name: string; kind: BandKind; blocks: Block[]; contentWidth: number; fieldSection: string }[] = [];
+
+  /**
    * The next NUMBERED relationship id. Counted over the numbered rels only: the
    * band rels (rIdHeader1 / rIdFooter1) are named, and counting them shifted
    * every hyperlink and image id two places away from the PHP engine's.
@@ -545,6 +566,42 @@ export class DocxWriter {
   }
 
   /**
+   * A `{blocks}` header or footer (PHP 0.14.0, last-word#6), through the body's own
+   * block renderer, as a complete part. Mirrors PHP `DocxWriter::blocksBandXml()`.
+   *
+   * Rendered with the part's OWN relationships swapped in, so an image or a link
+   * registers in `word/_rels/{name}.xml.rels` and its rId is scoped to this part.
+   * Media share the document's counter and so its `image{n}` names, and drawing ids
+   * share the document's: nothing in the package repeats a media name or a
+   * `wp:docPr` id. Wrapped in a content control tagged `lastword:band`, so a blocks
+   * band reads back as blocks even when it is one plain paragraph.
+   */
+  private blocksBandXml(name: string, kind: BandKind, blocks: Block[]): string {
+    const [rels, hyperlinkIds] = [this.rels, this.hyperlinkIds];
+    [this.rels, this.hyperlinkIds] = [[], new Map()];
+    this.inBand = true;
+    let content: string;
+    try {
+      content = this.renderBlocks(blocks, {});
+    } finally {
+      this.bandRels.set(name, this.rels);
+      this.inBand = false;
+      [this.rels, this.hyperlinkIds] = [rels, hyperlinkIds];
+    }
+    // A block container must end in a paragraph, as a table cell must.
+    if (!content.endsWith("</w:p>") && !content.endsWith("<w:p/>")) content += "<w:p/>";
+    const tag = kind === "header" ? "w:hdr" : "w:ftr";
+    return (
+      Xml.declaration() +
+      `<${tag} xmlns:w="${NS_W}" xmlns:r="${NS_R}" xmlns:wp="${NS_WP}" xmlns:a="${NS_A}" xmlns:pic="${NS_PIC}">` +
+      `<w:sdt><w:sdtPr><w:tag w:val="${SDT_TAG_BAND}"/></w:sdtPr><w:sdtContent>` +
+      content +
+      `</w:sdtContent></w:sdt>` +
+      `</${tag}>`
+    );
+  }
+
+  /**
    * The document's own header and footer slots, for every stretch: parts by slot,
    * their relationships, `w:evenAndOddHeaders`, and each section's `w:titlePg` and
    * references -- default, first, even within a kind, header before footer. Mirrors PHP
@@ -574,8 +631,8 @@ export class DocxWriter {
    * One stretch's own parts, kind -> reference type -> rId, in slot order, header before
    * footer. An empty first or even band (`{"blocks": []}`, or a band with no text) blanks
    * that page when the kind has a default band, and is nothing otherwise. A `{blocks}`
-   * band with content is a band this engine does not write (PHP 0.14.0, last-word#6), and
-   * asks for nothing here, as it always has for `header` / `footer`.
+   * band with content (PHP 0.14.0, last-word#6) gets its part here and its content
+   * after the body (see `bandPart()`).
    */
   private stretchBands(stretch: Stretch, k: number): Record<BandKind, Partial<Record<BandType, string>>> {
     const pageSpec: Any = isPlainObject(stretch.doc.page) ? stretch.doc.page : {};
@@ -605,8 +662,20 @@ export class DocxWriter {
       if (known !== undefined) return known;
     }
     const name = `${kind}${k === 0 ? n : this.nextPart[kind]}`;
-    const spec = band(raw);
-    let xml: string | null = spec !== null ? this.bandXml(kind, spec) : null;
+    const rawBlocks = isPlainObject(raw) && Object.prototype.hasOwnProperty.call(raw, "blocks") ? (raw as Any).blocks : undefined;
+    let xml: string | null;
+    if (Array.isArray(rawBlocks) && rawBlocks.length > 0) {
+      // A `{blocks}` band (PHP 0.14.0, last-word#6). Its content renders AFTER the
+      // body, as PHP's does, so the media it holds are numbered after the body's;
+      // the part and its relationship are placed now, in slot order.
+      this.deferredBands.push({ name, kind, blocks: rawBlocks as Block[], contentWidth: this.contentWidth, fieldSection: this.fieldSection });
+      xml = "";
+    } else if (rawBlocks !== undefined) {
+      xml = null; // the blocks form, asking for nothing: never the one-line form
+    } else {
+      const spec = band(raw);
+      xml = spec !== null ? this.bandXml(kind, spec) : null;
+    }
     if (xml === null) {
       const blocks = isPlainObject(raw) ? (raw as Any).blocks : undefined;
       const asksForNothing = (isPlainObject(raw) || Array.isArray(raw)) && !(Array.isArray(blocks) && blocks.length > 0);
@@ -695,6 +764,9 @@ export class DocxWriter {
     this.footnoteRels = [];
     this.footnoteHyperlinkIds = new Map();
     this.inFootnote = false;
+    this.inBand = false;
+    this.bandRels = new Map();
+    this.deferredBands = [];
 
     // meta.author (PHP 0.16.0) is dc:creator, beside the title in the core
     // part; a document with neither writes no core part, as before. Both are
@@ -731,6 +803,15 @@ export class DocxWriter {
         body += (k > 0 && rendered === "" ? "<w:p/>" : rendered) + sectPr;
       }
     });
+    // `{blocks}` bands, after the body as PHP renders them, so media and drawing
+    // numbers run body first.
+    for (const job of this.deferredBands) {
+      this.contentWidth = job.contentWidth;
+      this.fieldSection = job.fieldSection;
+      const xml = this.blocksBandXml(job.name, job.kind, job.blocks);
+      const entry = this.bands.find((b) => b.name === job.name);
+      if (entry !== undefined) entry.xml = xml;
+    }
     const documentXml =
       Xml.declaration() +
       `<w:document xmlns:w="${NS_W}" xmlns:r="${NS_R}" xmlns:wp="${NS_WP}" xmlns:a="${NS_A}" xmlns:pic="${NS_PIC}">` +
@@ -756,6 +837,10 @@ export class DocxWriter {
     }
     for (const b of this.bands) {
       files.push({ name: `word/${b.name}.xml`, data: encode(b.xml) });
+      const rels = this.bandRels.get(b.name) ?? [];
+      if (rels.length > 0) {
+        files.push({ name: `word/_rels/${b.name}.xml.rels`, data: encode(this.relsXml(rels)) });
+      }
     }
     if (this.footnotes.length > 0) {
       files.push({ name: "word/footnotes.xml", data: encode(this.footnotesXml()) });
@@ -793,6 +878,9 @@ export class DocxWriter {
       // single two-row table in Word, with the first table's column grid
       // imposed on the second. PHP and Python have always done this; the port
       // did not, and its own reference document has adjacent tables.
+      if (this.inBand && BAND_REFUSED_TYPES.includes(type)) {
+        continue; // validation refuses these in a band; unvalidated, they are nothing
+      }
       if (this.inFootnote && FOOTNOTE_REFUSED_TYPES.includes(type)) {
         continue; // validation refuses these in a footnote; unvalidated, they are nothing
       }
@@ -955,15 +1043,33 @@ export class DocxWriter {
     rPr += shadingXml(run.highlight);
     const pr = rPr === "" ? "" : `<w:rPr>${rPr}</w:rPr>`;
 
-    // Newlines inside a run become soft line breaks.
-    const parts = run.text.split("\n");
+    // In a `{blocks}` band (PHP 0.14.0, last-word#6) the field tokens are live
+    // fields, as in a band's slots: complex fields, every piece in this run's
+    // formatting. In the body they are literal text, as always.
+    if (this.inBand && Schema.FIELD_TOKEN.test(run.text)) {
+      let out = "";
+      for (const piece of Schema.splitFieldTokens(run.text)) {
+        out +=
+          typeof piece === "string"
+            ? `<w:r>${pr}${DocxWriter.runBody(piece)}</w:r>`
+            : this.fieldRuns(piece.name, piece.instruction, `<w:r>${pr}`);
+      }
+      return out;
+    }
+
+    return `<w:r>${pr}${DocxWriter.runBody(run.text)}</w:r>`;
+  }
+
+  /** Run text as w:t pieces, a newline as a soft line break (w:br). */
+  private static runBody(text: string): string {
+    const parts = text.split("\n");
     let content = "";
     parts.forEach((part, i) => {
       if (i > 0) content += `<w:br/>`;
       if (part !== "") content += `<w:t xml:space="preserve">${Xml.text(part)}</w:t>`;
     });
     if (content === "") content = `<w:t xml:space="preserve"></w:t>`;
-    return `<w:r>${pr}${content}</w:r>`;
+    return content;
   }
 
   // ── Footnotes ─────────────────────────────────────────────────────────────
@@ -972,7 +1078,7 @@ export class DocxWriter {
    * A footnote run: its blocks rendered into the next footnote, and the
    * reference run that marks it in the text. Nothing inside another footnote,
    * and nothing for a footnote with no blocks to render (validation refuses
-   * both; this engine renders no runs in a header or footer). Mirrors PHP
+   * both, and a footnote in a header or footer, which Word cannot hold). Mirrors PHP
    * `renderFootnoteRun()`.
    *
    * The blocks render with the footnote part's OWN relationships swapped in,
@@ -983,7 +1089,7 @@ export class DocxWriter {
   private renderFootnoteRun(run: Any): string {
     const note = run.footnote;
     const blocks: Block[] = isPlainObject(note) && Array.isArray((note as Any).blocks) ? (note as Any).blocks : [];
-    if (this.inFootnote || blocks.length === 0) return "";
+    if (this.inBand || this.inFootnote || blocks.length === 0) return "";
 
     const [rels, hyperlinkIds] = [this.rels, this.hyperlinkIds];
     [this.rels, this.hyperlinkIds] = [this.footnoteRels, this.footnoteHyperlinkIds];

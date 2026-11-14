@@ -295,9 +295,11 @@ export interface ResolvedPageMargins {
 /**
  * A running header or footer: one line with a left, a centre and a right slot.
  * Slot text carries live field tokens ({page}, {pages}, {date:yyyy-MM-dd} ...;
- * see `Schema.splitFieldTokens()`). `{blocks: []}` is the empty band a first or
- * even variant uses to blank its page (and what read() returns for one); this
- * engine writes no `{blocks}` band with content.
+ * see `Schema.splitFieldTokens()`). Or `{blocks}` (PHP 0.14.0, last-word#6): the
+ * body's blocks less chart and pageBreak, for a letterhead's logo and address --
+ * never mixed with the slots. `{blocks: []}` is the empty band a first or even
+ * variant uses to blank its page (and what read() returns for one). This engine's
+ * reader does not yet return a band's blocks.
  */
 export interface PageBand {
   left?: string;
@@ -375,6 +377,8 @@ export interface Doc {
 export interface ValidationError {
   path: string;
   message: string;
+  /** A stable code, where one is defined: `image_unknown` for a name no image is registered under. */
+  code?: string;
 }
 
 export interface RepairResult {

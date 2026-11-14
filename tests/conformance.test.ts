@@ -300,8 +300,8 @@ const TEMPLATE_PARTS =
   "needs templateParts (PHP 0.13.0, last-word#5): this engine takes a template's styles and theme only, never its " +
   "header/footer section, so templateFirstPageOnly (PHP 0.16.0) has nothing to act on";
 const BLOCKS_BAND =
-  "writes a {blocks} header/footer (PHP 0.14.0, last-word#6), which this engine does not write; the one-line " +
-  "form of the same contract is covered by the other rows";
+  "reads a {blocks} header/footer (PHP 0.14.0, last-word#6) back; this engine WRITES one (CC-fancy-0039) " +
+  "but its reader does not yet return a band's blocks";
 const NODE_SKIPS: Record<string, string> = {
   "0054-template-letterhead-every-page": TEMPLATE_PARTS,
   "0055-template-first-page-only-false": TEMPLATE_PARTS,
@@ -310,10 +310,8 @@ const NODE_SKIPS: Record<string, string> = {
   "0058-template-first-page-only-uses-its-first-part": TEMPLATE_PARTS,
   "0059-template-first-page-only-document-first-wins": TEMPLATE_PARTS,
   "0060-read-back-template-first-page-only": TEMPLATE_PARTS,
-  "0061-first-header-parts": BLOCKS_BAND,
   "0064-read-back-first-and-even": BLOCKS_BAND,
   "0065-fixpoint-first-and-even-bands": BLOCKS_BAND,
-  "0069-field-tokens-in-a-blocks-band": BLOCKS_BAND,
 };
 
 const EXTRACTORS: Record<string, (doc: unknown) => unknown> = {
@@ -436,7 +434,7 @@ describe("fancy-conformance: last-word/docx-constructs", () => {
     // 0.41.0's rows, 26 of them: the skips are a minority, and the rest run.
     const added = cases.filter((c) => c.id >= "0054" && c.id < "0080");
     expect(added.length).toBe(26);
-    expect(added.filter((c) => !(c.id in NODE_SKIPS)).length).toBe(15);
+    expect(added.filter((c) => !(c.id in NODE_SKIPS)).length).toBe(17);
   });
 
   it("the extractors discriminate — a wrong document fails its own row", () => {

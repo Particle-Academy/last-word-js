@@ -1,5 +1,6 @@
 export { Agent, VERSION, convertTemplate, type WriteOptions } from "./agent";
-export { SchemaException, UnsupportedFormatException, TemplateException, ArchiveRefused, OfficeTemplateRefused } from "./exceptions";
+export { SchemaException, UnsupportedFormatException, TemplateException, ArchiveRefused, OfficeTemplateRefused, ImageRefused } from "./exceptions";
+export { NamedImages, IMAGE_PREFIX, DEFAULT_IMAGE_LIMITS, type NamedImage, type ImageLimits, type ImageOptions } from "./writer/named-images";
 export type { SourceKind } from "./zip/office-template";
 export type { ArchiveLimits } from "./zip/source-archive";
 export * from "./schema/types";

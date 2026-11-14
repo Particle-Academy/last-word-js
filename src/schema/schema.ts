@@ -79,6 +79,13 @@ export const Schema = {
   FOOTNOTE_REFUSED_TYPES: ["chart", "pageBreak", "portable"] as const,
 
   /**
+   * Block types a `{blocks}` header or footer refuses, at any depth (PHP
+   * `Schema::BAND_REFUSED_TYPES`): a chart's parts are wired to the body, and a
+   * page break means nothing in a running header.
+   */
+  BAND_REFUSED_TYPES: ["chart", "pageBreak", "portable"] as const,
+
+  /**
    * The page object's own keys, which an agent writes straight on a `pageBreak`
    * when it means `pageBreak.page`. Each is refused by name rather than ignored
    * as a decoration: ignored, the document comes out all portrait and looks
@@ -300,31 +307,32 @@ export const Schema = {
             orientation: { type: "string", enum: ["portrait", "landscape"] },
             margins: { $ref: "#/definitions/pageMargins" },
             header: {
-              $ref: "#/definitions/band",
-              description: "A running header on every page. With a firstHeader, every page but the first; with an evenHeader, the odd pages.",
+              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blocksBand" }],
+              description:
+                "A running header on every page: a one-line band, or blocks (a letterhead with a logo). With a firstHeader, every page but the first; with an evenHeader, the odd pages.",
             },
             footer: {
-              $ref: "#/definitions/band",
+              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blocksBand" }],
               description:
                 "A running footer on every page -- where a multi-page document carries its page numbers. With a firstFooter, every page but the first; with an evenFooter, the odd pages.",
             },
             firstHeader: {
-              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blankBand" }],
+              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blocksBand" }],
               description:
-                'The header of the FIRST page only, in place of header there (Word\'s "Different first page"): a title-page header, a plainer one after. {"blocks": []} leaves page one with no header when header is set.',
+                'The header of the FIRST page only, in place of header there (Word\'s "Different first page"): a letterhead on page one, a plainer header after. {"blocks": []} leaves page one with no header when header is set.',
             },
             firstFooter: {
-              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blankBand" }],
+              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blocksBand" }],
               description:
                 'The footer of the first page only, in place of footer there. Without it the footer is on the first page too. {"blocks": []} leaves page one with no footer when footer is set.',
             },
             evenHeader: {
-              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blankBand" }],
+              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blocksBand" }],
               description:
                 'The header of even pages (Word\'s "Different odd and even pages"); header is then the odd pages\'. For a bound, two-sided document.',
             },
             evenFooter: {
-              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blankBand" }],
+              oneOf: [{ $ref: "#/definitions/band" }, { $ref: "#/definitions/blocksBand" }],
               description: "The footer of even pages; footer is then the odd pages'. Without it the footer is on even pages too.",
             },
           };
@@ -490,13 +498,23 @@ export const Schema = {
           },
         },
         band,
-        blankBand: {
+        blocksBand: {
           type: "object",
           required: ["blocks"],
           additionalProperties: false,
           description:
-            'An empty first or even band, {"blocks": []}: that page shows no header (footer) where the default would otherwise show. (This engine writes no {blocks} band with content.)',
-          properties: { blocks: { type: "array", maxItems: 0 } },
+            'A running header or footer that holds blocks -- the body\'s own vocabulary less chart and pageBreak (at any depth) -- for what one line cannot: a logo, an address over several lines, a table. e.g. {"blocks": [{"type": "image", "src": "data:image/png;base64,...", "widthPx": 140}, {"type": "paragraph", "align": "right", "runs": [{"text": "Acme Ltd, 1 Example Street", "size": 9}]}]}. In run text the field tokens are live fields, as in a band ({page}, {pages}, {date:yyyy-MM-dd} ...). Never mixed with left/center/right/size/color. Images: PNG or JPEG data URLs whose bytes match, each at most 16 MiB, at most 32 MiB across the header and footer.',
+          properties: {
+            blocks: {
+              type: "array",
+              items: {
+                allOf: [
+                  { $ref: "#/definitions/block" },
+                  { not: { properties: { type: { enum: ["chart", "pageBreak"] } }, required: ["type"] } },
+                ],
+              },
+            },
+          },
         },
         listItem: {
           type: "object",

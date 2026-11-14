@@ -85,7 +85,7 @@ export class Repairer {
     if ("meta" in doc) out = this.repairMeta(doc);
     out.blocks = this.repairBlocks(out.blocks ?? [], "/blocks");
 
-    // A `{blocks}` header or footer (PHP 0.14.0; this engine does not write one)
+    // A `{blocks}` header or footer (PHP 0.14.0, last-word#6)
     // is repaired in the band's context, so a footnote in it is dropped with a
     // note, as PHP does: a header or footer cannot hold one. Every band key,
     // first and even included (PHP 0.16.0).
@@ -260,7 +260,10 @@ export class Repairer {
         break;
 
       case "image":
-        if (typeof block.src !== "string" || !block.src.startsWith("data:image/")) {
+        // A named image (`image:<name>`, CC-fancy-0039) is kept: whether the name is
+        // registered is for validation to say, with `image_unknown`, rather than for
+        // repair to settle by dropping the image the model asked for. Mirrors PHP.
+        if (typeof block.src !== "string" || (!block.src.startsWith("data:image/") && !block.src.startsWith("image:"))) {
           this.notes.push({ path: `${path}/src`, message: "Dropped image without a usable data URL during repair." });
           return null;
         }

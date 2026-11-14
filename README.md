@@ -154,9 +154,33 @@ and `Schema.fieldTokenOf()` are the grammar.
 top-level `title` (`dc:title`); there is no `meta.title`, which validation
 refuses and `validateAndRepair` moves to `title`.
 
-> **Where this engine differs from PHP.** It writes no `{blocks}` header or
-> footer with content (PHP 0.14.0): a variant like that is ignored, as a
-> `{blocks}` `header` always was here. And it takes a template's styles and
+A header or footer can also hold blocks, `{ blocks: [...] }` -- the body's
+vocabulary less chart and pageBreak -- for a letterhead's logo and address, with
+the field tokens live in its run text.
+
+### Named images
+
+The host registers images by name; the model places them by name, in the body
+or a header or footer, and never carries the bytes:
+
+```ts
+const images = { logo: { data: logoPngBytes, widthPx: 150, heightPx: 50, alt: "Acme Ltd" }, seal: sealDataUrl };
+
+Agent.guide({ images });      // the guide, plus a section listing image:logo and image:seal
+Agent.jsonSchema({ images }); // image src takes exactly those names, or a data URL
+Agent.toBytes({ page: { header: { blocks: [{ type: "image", src: "image:logo" }] } }, blocks }, { images });
+```
+
+Each image is PNG or JPEG bytes, a data URL, or `{ data, widthPx?, heightPx?, alt? }`,
+checked as it is registered against `imageLimits` (`maxBytes` 5 MiB, `maxWidthPx`
+and `maxHeightPx` 4096, `maxImages` 32 by default); a refused one throws
+`ImageRefused` with a stable `reason`. An `image:` name nobody registered is a
+validation error with `code: "image_unknown"`. A named image writes exactly what
+the same image as a data URL writes, and the PHP package does the same thing
+byte for byte.
+
+> **Where this engine differs from PHP.** Its reader does not yet return a
+> `{blocks}` header or footer's blocks. And it takes a template's styles and
 > theme only, never its header/footer section (`templateParts`, PHP 0.13.0), so
 > the PHP option `templateFirstPageOnly` (the house letterhead on page one only)
 > has nothing to act on: it is not in `WriteOptions`, and passing it changes

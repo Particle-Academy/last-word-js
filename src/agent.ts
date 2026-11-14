@@ -26,6 +26,7 @@ import { Schema } from "./schema/schema";
 import type { Block, Doc, ListItem, RepairResult, ValidationError, WriteResult } from "./schema/types";
 import { Validator } from "./schema/validator";
 import { DocxWriter } from "./writer/docx-writer";
+import { NamedImages, type ImageOptions } from "./writer/named-images";
 import { convert as convertOfficeTemplate, type SourceKind } from "./zip/office-template";
 
 /** This package's own version, pinned to package.json by `version.test.ts`. */
@@ -38,8 +39,8 @@ function toU8(input: Uint8Array | ArrayBuffer): Uint8Array {
   return input instanceof Uint8Array ? input : new Uint8Array(input);
 }
 
-function assertValid(doc: Any): void {
-  const errors = new Validator().validate(doc);
+function assertValid(doc: Any, validator: Validator = new Validator()): void {
+  const errors = validator.validate(doc);
   if (errors.length > 0) {
     throw new SchemaException(
       "Doc failed schema validation. Call Agent.validateAndRepair() for a recoverable form.",
@@ -55,7 +56,28 @@ function assertValid(doc: Any): void {
  */
 export type WriteOptions = {
   template?: Uint8Array | string;
-};
+} & ImageOptions;
+
+/** A validator that knows the names of the images the host registered (CC-fancy-0039). */
+function validatorFor(images: NamedImages | null): Validator {
+  return new Validator(images?.names() ?? []);
+}
+
+/**
+ * The document the writer is given: validated, its named images (the `images`
+ * option) resolved into the data URLs the writer takes, and validated once more,
+ * so a band's image bytes count towards its limits whether they came as a name or
+ * not. Mirrors PHP `Agent::writable()`.
+ */
+function writable(doc: Any, options?: ImageOptions): Any {
+  const images = NamedImages.fromOptions(options);
+  const validator = validatorFor(images);
+  assertValid(doc, validator);
+  if (images === null) return doc;
+  const resolved = images.resolve(doc);
+  assertValid(resolved, validator);
+  return resolved;
+}
 
 /**
  * The `template` option as an opened template, or undefined when absent.
@@ -83,9 +105,16 @@ function templateFrom(options?: WriteOptions): DocxTemplate | undefined {
 }
 
 export const Agent = {
-  /** Validate a doc without writing. Empty array = valid. */
-  validate(doc: Any): ValidationError[] {
-    return new Validator().validate(doc);
+  /**
+   * Validate a doc without writing. Empty array = valid.
+   *
+   * Options: `images` and `imageLimits`, as `toBytes()` takes them, so an
+   * `image:<name>` src is checked against the images the host registered. A name
+   * that is not registered -- or any name, with none registered -- is an error with
+   * `code: "image_unknown"`. A refused image throws `ImageRefused`.
+   */
+  validate(doc: Any, options?: ImageOptions): ValidationError[] {
+    return validatorFor(NamedImages.fromOptions(options)).validate(doc);
   },
 
   /**
@@ -95,14 +124,17 @@ export const Agent = {
    * the repaired doc validates clean; `errors` retains anything the repair
    * dropped plus any remaining validation errors.
    */
-  validateAndRepair(doc: Any): RepairResult {
-    const errors = this.validate(doc);
+  validateAndRepair(doc: Any, options?: ImageOptions): RepairResult {
+    // Named images stay named in `schema`: repair never drops one, so an unknown
+    // name leaves the result `ok: false` with an `image_unknown` error to correct.
+    const validator = validatorFor(NamedImages.fromOptions(options));
+    const errors = validator.validate(doc);
     if (errors.length === 0) {
       return { ok: true, schema: doc, errors: [] };
     }
     const repairer = new Repairer();
     const repaired = repairer.repair(doc) as Doc;
-    const remaining = this.validate(repaired);
+    const remaining = validator.validate(repaired);
 
     return {
       ok: remaining.length === 0,
@@ -136,10 +168,25 @@ export const Agent = {
    *
    * Bytes rather than a path, because this entry point is universal and a browser
    * has no filesystem. `write()` accepts either.
+   *
+   * `options.images` (CC-fancy-0039): images the HOST registers by name,
+   * `{logo: <PNG/JPEG bytes or data URL>, seal: {data, widthPx?, heightPx?, alt?}}`,
+   * which the document places as `{"type": "image", "src": "image:logo"}` -- in the
+   * body, a footnote, or a header or footer that holds `blocks`, so a letterhead
+   * carries the logo. Resolved at write time to exactly what the same image as a
+   * data URL writes. A block's own `widthPx` / `heightPx` / `alt` win over the
+   * registered ones (either size set on the block drops both registered sizes). An
+   * unregistered name throws `SchemaException` with `code: "image_unknown"`; a
+   * refused image throws `ImageRefused`. Pass the same option to `guide()` and
+   * `jsonSchema()` so the model knows the names.
+   *
+   * `options.imageLimits`: `maxBytes` (default 5 MiB), `maxWidthPx` and `maxHeightPx`
+   * (4096 each) and `maxImages` (32), positive integers, checked as each image is
+   * registered. Mirrors PHP.
    */
   toBytes(doc: Any, options?: WriteOptions): Uint8Array {
-    assertValid(doc);
-    return new DocxWriter(templateFrom(options)).toBytes(doc);
+    const resolved = writable(doc, options);
+    return new DocxWriter(templateFrom(options)).toBytes(resolved);
   },
 
   /**
@@ -148,7 +195,7 @@ export const Agent = {
    * filesystem path.
    */
   async write(doc: Any, path: string, options?: WriteOptions): Promise<WriteResult> {
-    assertValid(doc);
+    const writeDoc = writable(doc, options);
     const fs = await import("node:fs");
 
     let resolved = options;
@@ -160,7 +207,7 @@ export const Agent = {
       }
     }
 
-    const bytes = new DocxWriter(templateFrom(resolved)).toBytes(doc);
+    const bytes = new DocxWriter(templateFrom(resolved)).toBytes(writeDoc);
     fs.writeFileSync(path, bytes);
     return { path, bytes: bytes.length, blocks: doc?.blocks?.length ?? 0 };
   },
@@ -282,9 +329,21 @@ export const Agent = {
     return lines.join("\n");
   },
 
-  /** JSON Schema export for LLM tool-use registration. */
-  jsonSchema(): Record<string, unknown> {
-    return Schema.jsonSchema();
+  /**
+   * JSON Schema export for LLM tool-use registration.
+   *
+   * Options: `images` and `imageLimits`, as `toBytes()` takes them. With images
+   * registered, the image block's `src` names them (its pattern takes exactly those
+   * names besides a data URL, and its description lists them, as PHP's does);
+   * without, the schema is exactly what it was before the option existed.
+   */
+  jsonSchema(options?: ImageOptions): Record<string, unknown> {
+    const schema = Schema.jsonSchema();
+    const images = NamedImages.fromOptions(options);
+    if (images === null) return schema;
+    const block = ((schema as Any).definitions as Any).block as Any;
+    block.properties.src = { type: "string", pattern: images.srcPattern(), description: images.srcDescription() };
+    return schema;
   },
 
   /**
@@ -338,8 +397,14 @@ export const Agent = {
    * idioms that produce it. Give it to a model with the schema; it works with any
    * agent loop. Byte-identical to the PHP package's agent-guide/professional-documents.md.
    */
-  guide(): string {
-    return (agentGuide as { guide: string }).guide;
+  guide(options?: ImageOptions): string {
+    // With images registered (the `images` option, as `toBytes()` takes it), a
+    // section listing their names, types, sizes and alt text is appended -- the
+    // same text PHP appends -- so the model places them rather than inventing
+    // images. Without, the guide is the shared bytes alone.
+    const images = NamedImages.fromOptions(options);
+    const guide = (agentGuide as { guide: string }).guide;
+    return images === null ? guide : guide + images.guideSection();
   },
 
   version(): string {

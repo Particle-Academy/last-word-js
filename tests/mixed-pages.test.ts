@@ -11,7 +11,8 @@ type Any = any;
 /*
  * Mixed page orientation, stage 2 (.ai/plans/mixed-page-orientation.md): a pageBreak
  * with `page` starts a new Word section. Case for case with PHP's MixedPagesTest, less
- * its template, `{blocks}` band and border cases, which this engine does not write;
+ * its template and border cases, which this engine does not write, and its `{blocks}`
+ * band cases (written since CC-fancy-0039; named-images.test.ts and conformance cover them);
  * every part held byte-identical to the PHP writer.
  */
 
