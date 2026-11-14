@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-14
+
 ### Added
 
 - **Named images (CC-fancy-0039), at parity with PHP `particle-academy/last-word`.** The host registers images with the writer by name, `Agent.toBytes(doc, { images: { logo: <PNG/JPEG bytes or data URL>, seal: { data, widthPx: 150, heightPx: 50, alt: "Acme Ltd" } } })`, and the model places one with `{"type": "image", "src": "image:logo"}`: in the body, a footnote, or a header or footer that holds `blocks`, so a letterhead carries the logo. Resolved at write time to exactly what the same image as a data URL writes. A block's own `widthPx` / `heightPx` / `alt` win over the registered ones. `write()` takes the same option.

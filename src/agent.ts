@@ -30,7 +30,7 @@ import { NamedImages, type ImageOptions } from "./writer/named-images";
 import { convert as convertOfficeTemplate, type SourceKind } from "./zip/office-template";
 
 /** This package's own version, pinned to package.json by `version.test.ts`. */
-export const VERSION = "0.16.2";
+export const VERSION = "0.17.0";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
